@@ -90,10 +90,3 @@ def update_positions_with_timestamp(input_folder, output_folder):
     output_file = os.path.join(output_folder, f"{timestamp}_positions_list.csv")
     updated_data.to_csv(output_file, index=False)
     print(f"Updated positions list saved to {output_file}")
-
-# Define input and output paths
-input_folder = './data/raw_data'
-output_folder = './data/clean_data'
-
-# Update positions list
-update_positions_with_timestamp(input_folder, output_folder)

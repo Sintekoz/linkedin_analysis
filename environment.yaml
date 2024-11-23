@@ -1,4 +1,4 @@
-name: linkedin_analysis2
+name: linkedin_analysis
 channels:
   - defaults
   - conda-forge
