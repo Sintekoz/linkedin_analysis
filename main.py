@@ -9,8 +9,8 @@ from selenium.common.exceptions import WebDriverException
 # Define directories
 RAW_DATA_FOLDER = "./raw_data"
 CLEAN_DATA_FOLDER = "./data/clean_data"
-OUTPUT_FOLDER = "/Users/sintekoz/Library/CloudStorage/OneDrive-Personal/Data Science/Personal/linkedin_analysis/output"
-CV_PATH = "/Users/sintekoz/Library/CloudStorage/OneDrive-Personal/Data Science/Personal/linkedin_analysis/user_data/"
+OUTPUT_FOLDER = "./output"
+CV_PATH = "./user_data"
 
 def scrape_jobs():
     """Scrape job listings and save them as raw data."""
