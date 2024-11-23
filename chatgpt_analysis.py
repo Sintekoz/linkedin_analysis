@@ -125,3 +125,4 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
     df.to_csv(output_file, index=False)
 
     print(f"Processed CSV file saved to {output_file}")
+    

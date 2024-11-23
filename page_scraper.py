@@ -12,9 +12,12 @@ from selenium.common.exceptions import WebDriverException, NoSuchElementExceptio
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
-def scrape_linkedin_jobs():
+def scrape_linkedin_jobs(job_search_url_template):
     """
-    Scrapes LinkedIn jobs for a predefined URL search and saves job data to a CSV file.
+    Scrapes LinkedIn jobs for a given URL search template and saves job data to a CSV file.
+
+    Parameters:
+    - job_search_url_template (str): The base LinkedIn job search URL (with placeholders for pagination).
     """
     # Load environment variables from .env file
     load_dotenv()
@@ -65,15 +68,13 @@ def scrape_linkedin_jobs():
     # Step 1: Collect all job URLs from all pages
     job_urls = []
     try:
-        job_search_url_template = (
-            "https://www.linkedin.com/jobs/search/?geoId=104738515&keywords=senior%20analyst&start={}"
-        )
         page_number = 0
 
         while True:
             try:
                 print(f"Processing page {page_number + 1}...")
-                driver.get(job_search_url_template.format(page_number * 25))
+                current_url = job_search_url_template.format(start=page_number * 25)
+                driver.get(current_url)
                 time.sleep(5 + random.uniform(2, 4))  # Randomized wait time for page load
 
                 # Scroll to ensure all jobs are loaded
@@ -97,7 +98,8 @@ def scrape_linkedin_jobs():
                 # Stop if fewer than 25 jobs are on the page
                 if len(page_job_urls) < 25:
                     print("Fewer than 25 jobs on the page. Stopping pagination.")
-                elif len(job_urls) >= 5:    
+                # !!!FOR TEST
+                elif len(job_urls) >= 25:
                     break
 
                 # Increment page number for next page
