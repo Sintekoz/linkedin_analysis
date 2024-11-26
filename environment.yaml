@@ -10,3 +10,4 @@ dependencies:
   - pdfplumber
   - selenium
   - webdriver-manager
+  - sqlite

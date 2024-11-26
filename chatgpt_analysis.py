@@ -1,10 +1,8 @@
-import pandas as pd
 import os
+import sqlite3
 from dotenv import load_dotenv
-from datetime import datetime
 from openai import OpenAI
 import pdfplumber  # Library for reading PDFs
-from clean_data import get_most_recent_csv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -16,18 +14,17 @@ client = OpenAI(
 
 # Define directories
 cv_folder = "./user_data/"
-data_folder = "./data/clean_data/"
-output_folder = "./output/"
+db_path = "./linkedin_jobs.db"
 
 def analyze_jobs_with_chatgpt(prompt_suffix):
     """
-    Analyze job positions using ChatGPT and a user-provided prompt suffix.
+    Analyze job positions using ChatGPT and a user-provided prompt suffix, and save the analysis in SQLite.
 
     Parameters:
     - prompt_suffix: The final sentence of the prompt that adjusts how ChatGPT evaluates the job position.
 
     Returns:
-    - None: Saves the evaluated CSV to the output folder.
+    - None: Saves the evaluations to the SQLite database.
     """
     def get_most_recent_pdf(folder_path):
         """
@@ -72,25 +69,38 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
     # Extract CV content from PDF
     user_cv = extract_text_from_pdf(cv_path)
 
-    # Get the latest file
-    latest_file = get_most_recent_csv(data_folder)
-    print(f"Processing file: {latest_file}")
+    # Connect to the SQLite database
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
 
-    # Load the CSV file
-    df = pd.read_csv(latest_file)
+    # Ensure the chatgpt_analysis table exists
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS chatgpt_analysis (
+        job_id INTEGER PRIMARY KEY,
+        chatgpt_message TEXT,
+        FOREIGN KEY (job_id) REFERENCES job_ids (job_id)
+    )
+    """)
+    conn.commit()
 
-    # Initialize new column for fit scores
-    df['Fit Score'] = None
+    # Fetch job descriptions for IDs not yet in chatgpt_analysis
+    cursor.execute("""
+    SELECT job_id, job_description 
+    FROM job_description 
+    WHERE job_id NOT IN (SELECT job_id FROM chatgpt_analysis)
+    """)
+    jobs = cursor.fetchall()
 
     # Process the rows to evaluate job positions
-    for index, row in df.iterrows():
-        job_description = row.get('Job Description', '')  # Replace with the actual column name for job descriptions
+    for job in jobs:
+        job_id, job_description = job
+
         if not job_description:
-            print(f"Skipping row {index + 1}: No job description provided.")
+            print(f"Skipping job ID {job_id}: No job description provided.")
             continue  # Skip if no job description is available
 
-        print(f"Processing row {index + 1}...")
-        
+        print(f"Processing job ID {job_id}...")
+
         try:
             # Send the job description and CV to ChatGPT for evaluation
             response = client.chat.completions.create(
@@ -108,21 +118,21 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
                 ]
             )
             
-            # Extract fit score
-            fit_score = response.choices[0].message.content.strip()
-            print(f"Row {index + 1} processed. Fit score: {fit_score}")
+            # Extract ChatGPT's message
+            chatgpt_message = response.choices[0].message.content.strip()
+            print(f"Job ID {job_id} processed. ChatGPT message: {chatgpt_message}")
 
-            # Add the fit score to the DataFrame
-            df.at[index, 'Fit Score'] = fit_score
+            # Insert the analysis into the database
+            cursor.execute("""
+            INSERT INTO chatgpt_analysis (job_id, chatgpt_message)
+            VALUES (?, ?)
+            """, (job_id, chatgpt_message))
 
         except Exception as e:
-            print(f"Error processing row {index}: {e}")
+            print(f"Error processing job ID {job_id}: {e}")
 
-    # Save the updated DataFrame to a new CSV file with a timestamp
-    os.makedirs("./output", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M")
-    output_file = os.path.join(output_folder, f"{timestamp}_evaluated_jobs.csv")
-    df.to_csv(output_file, index=False)
+    # Commit the changes and close the connection
+    conn.commit()
+    conn.close()
 
-    print(f"Processed CSV file saved to {output_file}")
-    
+    print("ChatGPT analysis completed and saved to the database.")
