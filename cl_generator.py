@@ -85,4 +85,3 @@ def generate_cover_letter(job_id):
         # Close the database connection
         conn.close()
 
-generate_cover_letter(4056908380)
