@@ -52,12 +52,12 @@ def format_job_search_url(raw_url):
 
 if __name__ == "__main__":
     print("Connecting to the database...")
-    #setup_database()
+    setup_database()
 
     print("Starting the scrapping...")
-    #scrape_linkedin_jobs(format_job_search_url(format_job_search_url(LINKEDIN_SEARCH_URL)))
+    scrape_linkedin_jobs(format_job_search_url(format_job_search_url(LINKEDIN_SEARCH_URL)))
 
-    print("Analysing")
+    print("Analyzing")
     analyze_jobs_with_chatgpt(PROMPT_SUFFIX)
 
     print("Done")

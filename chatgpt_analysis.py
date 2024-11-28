@@ -16,6 +16,42 @@ client = OpenAI(
 cv_folder = "./user_data/"
 db_path = "./linkedin_jobs.db"
 
+def get_most_recent_pdf(folder_path):
+    """
+    Finds the most recent PDF file in the specified folder.
+
+    Parameters:
+    - folder_path: Path to the folder containing PDF files.
+
+    Returns:
+    - Path to the most recent PDF file or None if no files are found.
+    """
+    pdf_files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')]
+    if not pdf_files:
+        raise FileNotFoundError("No PDF files found in the specified folder.")
+    
+    full_paths = [os.path.join(folder_path, f) for f in pdf_files]
+    return max(full_paths, key=os.path.getmtime)
+
+def extract_text_from_pdf(pdf_path):
+    """
+    Extracts text content from a PDF file.
+
+    Parameters:
+    - pdf_path: Path to the PDF file.
+
+    Returns:
+    - Extracted text as a string.
+    """
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF file not found at {pdf_path}")
+    
+    text = ""
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() + "\n"
+    return text.strip()
+
 def analyze_jobs_with_chatgpt(prompt_suffix):
     """
     Analyze job positions using ChatGPT and a user-provided prompt suffix, and save the analysis in SQLite.
@@ -26,41 +62,6 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
     Returns:
     - None: Saves the evaluations to the SQLite database.
     """
-    def get_most_recent_pdf(folder_path):
-        """
-        Finds the most recent PDF file in the specified folder.
-
-        Parameters:
-        - folder_path: Path to the folder containing PDF files.
-
-        Returns:
-        - Path to the most recent PDF file or None if no files are found.
-        """
-        pdf_files = [f for f in os.listdir(folder_path) if f.endswith('.pdf')]
-        if not pdf_files:
-            raise FileNotFoundError("No PDF files found in the specified folder.")
-        
-        full_paths = [os.path.join(folder_path, f) for f in pdf_files]
-        return max(full_paths, key=os.path.getmtime)
-
-    def extract_text_from_pdf(pdf_path):
-        """
-        Extracts text content from a PDF file.
-
-        Parameters:
-        - pdf_path: Path to the PDF file.
-
-        Returns:
-        - Extracted text as a string.
-        """
-        if not os.path.exists(pdf_path):
-            raise FileNotFoundError(f"PDF file not found at {pdf_path}")
-        
-        text = ""
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() + "\n"
-        return text.strip()
 
     # Get the most recent CV
     cv_path = get_most_recent_pdf(cv_folder)
