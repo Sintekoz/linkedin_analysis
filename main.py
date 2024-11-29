@@ -1,4 +1,5 @@
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from check_cancelled import process_ongoing_jobs
 from page_scraper import setup_database, scrape_linkedin_jobs
 from chatgpt_analysis import analyze_jobs_with_chatgpt
 
@@ -54,8 +55,11 @@ if __name__ == "__main__":
     print("Connecting to the database...")
     setup_database()
 
-    print("Starting the scrapping...")
-    scrape_linkedin_jobs(format_job_search_url(format_job_search_url(LINKEDIN_SEARCH_URL)))
+    print("Checking if the existing positions are still ongoing")
+    process_ongoing_jobs()
+
+    print("Starting scrapping the new positions")
+    scrape_linkedin_jobs(format_job_search_url(LINKEDIN_SEARCH_URL))
 
     print("Analyzing")
     analyze_jobs_with_chatgpt(PROMPT_SUFFIX)

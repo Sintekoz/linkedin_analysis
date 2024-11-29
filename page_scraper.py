@@ -44,7 +44,6 @@ def setup_database():
     conn.commit()
     conn.close()
 
-
 # Function to update job status
 def update_job_status(job_id, status, job_url):
     conn = sqlite3.connect('linkedin_jobs.db')
@@ -73,7 +72,6 @@ def update_job_status(job_id, status, job_url):
     conn.commit()
     conn.close()
 
-
 # Function to insert job details into job_description table
 def insert_job_details(job_id, job_description, location, posted_date, num_applicants, work_model):
     conn = sqlite3.connect('linkedin_jobs.db')
@@ -88,17 +86,8 @@ def insert_job_details(job_id, job_description, location, posted_date, num_appli
     conn.commit()
     conn.close()
 
-
-# Main scraping function
-def scrape_linkedin_jobs(job_search_url_template):
-    load_dotenv()
-
-    linkedin_username = os.getenv("LINKEDIN_EMAIL")
-    linkedin_password = os.getenv("LINKEDIN_PASSWORD")
-
-    if not linkedin_username or not linkedin_password:
-        raise ValueError("LinkedIn email or password not found in .env file")
-
+# Function to initaliase Selenium
+def init_driver():
     chrome_options = Options()
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -106,13 +95,20 @@ def scrape_linkedin_jobs(job_search_url_template):
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-popup-blocking")
 
-    def init_driver():
-        return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-    def shorten_job_url(raw_url):
-        return raw_url.split("?")[0].split('/')[-2]  # Extracts job_id
+def shorten_job_url(raw_url):
+    return raw_url.split("?")[0].split('/')[-2]  # Extracts job_id
 
-    driver = init_driver()
+# Main scraping function
+def login_mainpage(driver):
+    load_dotenv()
+
+    linkedin_username = os.getenv("LINKEDIN_EMAIL")
+    linkedin_password = os.getenv("LINKEDIN_PASSWORD")
+
+    if not linkedin_username or not linkedin_password:
+        raise ValueError("LinkedIn email or password not found in .env file")
 
     try:
         driver.get("https://www.linkedin.com/login")
@@ -130,9 +126,15 @@ def scrape_linkedin_jobs(job_search_url_template):
         driver.quit()
         return
 
-    job_urls = []
+def scrape_linkedin_jobs(job_search_url_template):
+    #Login to the main page
+    driver = init_driver()
+
     try:
+        # Log in to LinkedIn
+        login_mainpage(driver)
         page_number = 0
+        job_urls = []
 
         while True:
             current_url = f"{job_search_url_template}&start={page_number * 25}"
@@ -150,6 +152,7 @@ def scrape_linkedin_jobs(job_search_url_template):
                 last_scroll_top = current_scroll_top
 
             job_cards = job_list.find_elements(By.CSS_SELECTOR, "a[href*='/jobs/view/']")
+    
             page_job_urls = [shorten_job_url(job.get_attribute('href')) for job in job_cards]
             job_urls.extend(page_job_urls)
 
@@ -162,6 +165,18 @@ def scrape_linkedin_jobs(job_search_url_template):
         print(f"Collected {len(job_urls)} job IDs.")
 
     try:
+        # Connect to the database to retrieve all existing job_ids
+        conn = sqlite3.connect('linkedin_jobs.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT job_id FROM job_ids')
+        existing_job_ids = {row[0] for row in cursor.fetchall()}
+        conn.close()
+
+        # Filter out existing job IDs from job_urls
+        original_job_count = len(job_urls)
+        job_urls = [job_id for job_id in job_urls if job_id not in existing_job_ids]
+        print(f"Filtered out {original_job_count - len(job_urls)} existing job IDs. Remaining: {len(job_urls)}")
+
         for idx, job_url in enumerate(job_urls, start=1):
             job_id = job_url
 
@@ -172,12 +187,14 @@ def scrape_linkedin_jobs(job_search_url_template):
             # Check for the "cancelled" message using the specific class
             job_status = "ongoing"  # Default status
             try:
-                cancel_element = driver.find_element(By.CLASS_NAME, "artdeco-inline-feedback__message")
-                if "No longer accepting applications" in cancel_element.get_attribute("innerText"):
+                cancel_element = driver.find_element(By.CSS_SELECTOR, "span.artdeco-inline-feedback__message")
+                cancel_element_text = cancel_element.text
+                if "No longer accepting applications" in cancel_element_text:
                     job_status = "cancelled"
+                    update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
             except NoSuchElementException:
                 update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
-        
+
             # Extract job details regardless of status
             paragraphs = driver.find_elements(By.CSS_SELECTOR, "p[dir='ltr']")
             job_description = " ".join(
