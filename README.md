@@ -1,4 +1,3 @@
-
 # LinkedIn Analysis
 
 A Python-based tool for analyzing LinkedIn job postings using OpenAI's GPT models. This project allows you to extract and analyze job postings based on a LinkedIn search URL and provides insights tailored to your custom prompts.
@@ -16,6 +15,8 @@ A Python-based tool for analyzing LinkedIn job postings using OpenAI's GPT model
 - **Conda**: Make sure Conda is installed on your system.
 - **LinkedIn Account**: Required for accessing LinkedIn.
 - **OpenAI API Key**: Required for using GPT models.
+- **CV Submission**: Your CV must be placed in the `user_data` folder before running the script.
+- **Access Fee**: A $5 deposit must be made to OpenAI's account to enable access to the ChatGPT model.
 
 ---
 
@@ -58,6 +59,12 @@ A Python-based tool for analyzing LinkedIn job postings using OpenAI's GPT model
      ```text
      OPENAI_API_KEY=your_openai_secret_key
      ```
+
+3. **Submit Your CV**:
+   - Ensure your CV file is saved in the `user_data` folder within the project directory. The script may reference this information for analysis.
+
+4. **Access Fee Payment**:
+   - Deposit $5 to OpenAI's account to enable ChatGPT access. Without this, the script cannot perform GPT-based analysis.
 
 ---
 
@@ -110,3 +117,5 @@ This project is licensed under the [MIT License](LICENSE).
 - [LinkedIn](https://www.linkedin.com) for job data.
 - [OpenAI](https://openai.com) for their GPT models.
 - [Conda](https://docs.conda.io) for environment management.
+
+---
