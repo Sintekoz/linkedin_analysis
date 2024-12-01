@@ -1,17 +1,19 @@
 # LinkedIn Analysis
 
-A Python-based tool for analyzing LinkedIn job postings using OpenAI's GPT models. This project allows you to extract and analyze job postings based on a LinkedIn search URL and provides insights tailored to your custom prompts.
+A Python-based tool for analyzing LinkedIn job postings based on your CV using OpenAI's GPT models. This project allows you to extract and analyze job postings based on a LinkedIn search URL and provides insights tailored to your custom prompts and CV.
 
 ## Features
 
 - Scrape job postings from LinkedIn using Selenium.
 - Analyze job descriptions with OpenAI's GPT models.
 - Get tailored insights based on your custom prompts.
+- Generate a cover letter specifically for the job position you want
 
 ---
 
 ## Requirements
 
+- **Python**: Make sure Python is installed on your system.
 - **Conda**: Make sure Conda is installed on your system.
 - **LinkedIn Account**: Required for accessing LinkedIn.
 - **OpenAI API Key**: Required for using GPT models.
@@ -66,6 +68,8 @@ A Python-based tool for analyzing LinkedIn job postings using OpenAI's GPT model
 4. **Access Fee Payment**:
    - Deposit $5 to OpenAI's account to enable ChatGPT access. Without this, the script cannot perform GPT-based analysis.
 
+5. **Specify the job search URL you want to parse**:
+   - Go to [LinkedIn Job Search page](https://www.linkedin.com/jobs/search), adjust your preferred filters you are interested in, and copy the URL into `main.py`
 ---
 
 ## Usage
