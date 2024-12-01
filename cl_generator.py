@@ -85,3 +85,5 @@ def generate_cover_letter(job_id):
         # Close the database connection
         conn.close()
 
+#Enter job_id for which you want to generate your cover letter
+generate_cover_letter()

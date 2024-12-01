@@ -32,6 +32,8 @@ def setup_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS job_description (
             job_id TEXT PRIMARY KEY,
+            company_name TEXT,
+            title_name TEXT,
             job_description TEXT,
             location TEXT,
             posted_date TEXT,
@@ -73,15 +75,15 @@ def update_job_status(job_id, status, job_url):
     conn.close()
 
 # Function to insert job details into job_description table
-def insert_job_details(job_id, job_description, location, posted_date, num_applicants, work_model):
+def insert_job_details(job_id, company_name, title_name, job_description, location, posted_date, num_applicants, work_model):
     conn = sqlite3.connect('linkedin_jobs.db')
     cursor = conn.cursor()
 
     cursor.execute('''
         INSERT OR REPLACE INTO job_description (
-            job_id, job_description, location, posted_date, number_applicants, work_model
-        ) VALUES (?, ?, ?, ?, ?, ?)
-    ''', (job_id, job_description, location, posted_date, num_applicants, work_model))
+            job_id, company_name, title_name, job_description, location, posted_date, number_applicants, work_model
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (job_id, company_name, title_name, job_description, location, posted_date, num_applicants, work_model))
 
     conn.commit()
     conn.close()
@@ -139,7 +141,7 @@ def scrape_linkedin_jobs(job_search_url_template):
         while True:
             current_url = f"{job_search_url_template}&start={page_number * 25}"
             driver.get(current_url)
-            time.sleep(3 + random.uniform(1, 2))
+            time.sleep(4 + random.uniform(1, 2))
 
             job_list = driver.find_element(By.XPATH, "//*[@id='main']/div/div[2]/div[1]/div")
             last_scroll_top = -1
@@ -187,9 +189,12 @@ def scrape_linkedin_jobs(job_search_url_template):
             # Check for the "cancelled" message using the specific class
             job_status = "ongoing"  # Default status
             try:
-                cancel_element = driver.find_element(By.CSS_SELECTOR, "span.artdeco-inline-feedback__message")
-                cancel_element_text = cancel_element.text
-                if "No longer accepting applications" in cancel_element_text:
+                cancel_element1 = driver.find_element(By.CSS_SELECTOR, "span.artdeco-inline-feedback__message")
+                cancel_element2 = driver.find_element(By.CSS_SELECTOR, "p.jobs-box__body.jobs-no-job__error-msg")
+
+                cancel_element1_text = cancel_element1.text
+                cancel_element2_text = cancel_element2.text
+                if "No longer accepting applications" in cancel_element1_text or "The job you were looking for was not found" in cancel_element2_text:
                     job_status = "cancelled"
                     update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
             except NoSuchElementException:
@@ -201,6 +206,15 @@ def scrape_linkedin_jobs(job_search_url_template):
                 [p.get_attribute('innerText').strip() for p in paragraphs if p.get_attribute('innerText').strip()]
             )
 
+            # Extract company_name
+            company_element = driver.find_element(By.CLASS_NAME, "job-details-jobs-unified-top-card__company-name")
+            company_text = company_element.text
+            company_name = company_text.split("\n")[0].strip()
+            
+            # Extract title_name
+            job_title_element = driver.find_element(By.CSS_SELECTOR, "h1.t-24.t-bold.inline")
+            title_name = job_title_element.text.strip()
+
             try:
                 additional_info_element = driver.find_element(By.CSS_SELECTOR, "div.t-black--light.mt2[dir='ltr']")
                 additional_info = additional_info_element.get_attribute("innerText").strip()
@@ -209,11 +223,12 @@ def scrape_linkedin_jobs(job_search_url_template):
                 # If the element is not found, fill the variables with "Not Found"
                 location, posted_date, num_applicants = "Not Found", "Not Found", "Not Found"
 
+            # Extract work_model
             ui_label_elements = driver.find_elements(By.CSS_SELECTOR, "span.ui-label.ui-label--accent-3.text-body-small")
             work_model = " · ".join([label.text.strip() for label in ui_label_elements if label.text.strip()])
 
             # Insert job details into the database
-            insert_job_details(job_id, job_description, location, posted_date, num_applicants, work_model)
+            insert_job_details(job_id, company_name, title_name, job_description, location, posted_date, num_applicants, work_model)
 
     except Exception as e:
         print(f"Error extracting job details: {e}")
