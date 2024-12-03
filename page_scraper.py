@@ -99,7 +99,6 @@ def init_driver():
 
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-# Function to shorten search url
 def shorten_job_url(raw_url):
     return raw_url.split("?")[0].split('/')[-2]  # Extracts job_id
 
@@ -143,8 +142,8 @@ def get_job_details(driver, job_urls):
                 cancel_element = None  # Initialize with a default value
                 cancel_element_text = None  # Initialize with a default value
 
+                # Check for the cancelled job
                 try:
-                    #Check for the cancelled job
                     cancel_element = driver.find_element(By.CSS_SELECTOR, "span.artdeco-inline-feedback__message")
                     cancel_element_text = cancel_element.text
                     if "No longer accepting applications" in cancel_element_text:
@@ -229,7 +228,7 @@ def scrape_linkedin_jobs(job_search_url_template):
             page_job_urls = [shorten_job_url(job.get_attribute('href')) for job in job_cards]
             job_urls.extend(page_job_urls)
 
-            if len(page_job_urls) <= 100:
+            if len(page_job_urls) < 25:
                 break
             page_number += 1
     except Exception as e:

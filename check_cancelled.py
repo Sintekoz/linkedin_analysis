@@ -1,9 +1,5 @@
 import sqlite3
-import time
-import random
-from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver.common.by import By
-from page_scraper import update_job_status, login_mainpage, init_driver, insert_job_details, get_job_details
+from page_scraper import login_mainpage, init_driver, get_job_details
 
 def process_ongoing_jobs():
     """

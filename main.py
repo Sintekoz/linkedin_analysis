@@ -4,7 +4,7 @@ from page_scraper import setup_database, scrape_linkedin_jobs
 from chatgpt_analysis import analyze_jobs_with_chatgpt
 
 # Input your LindkedIn job search URL and specify what you want ChatGPT to analyze
-LINKEDIN_SEARCH_URL = 'https://www.linkedin.com/jobs/search/?currentJobId=4070063540&distance=25&geoId=104738515&keywords=senior%20analyst&origin=JOB_SEARCH_PAGE_LOCATION_AUTOCOMPLETE&refresh=true'
+LINKEDIN_SEARCH_URL = 'https://www.linkedin.com/jobs/search/?currentJobId=4083475215&f_E=3%2C4%2C5&f_JT=F%2CO&geoId=104738515&keywords=Senior%20Analyst&origin=JOB_SEARCH_PAGE_JOB_FILTER&refresh=true&sortBy=R'
 PROMPT_SUFFIX = (
         "Please score how well this position fits the user on a scale from 1 to 10, "
         "and provide the score only in the format 'X'. "
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     print("Connecting to the database...")
     setup_database()
 
-    print("Checking if the existing positions are still ongoing")
+    print("Checking if the existing positions in the database are still ongoing")
     process_ongoing_jobs()
 
     print("Starting scrapping the new positions")
