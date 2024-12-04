@@ -1,3 +1,8 @@
+### My contacts if you have any questions/suggestions or if you want to communicate something:
+E-mail: iegorshelestov@gmail.com LinkedIn: https://www.linkedin.com/in/iegor-shelestov/
+
+---
+
 # LinkedIn Analysis
 
 A Python-based tool for analyzing LinkedIn job postings based on your CV using OpenAI's GPT models. This project allows you to extract and analyze job postings based on a LinkedIn search URL and provides insights tailored to your custom prompts and CV.
