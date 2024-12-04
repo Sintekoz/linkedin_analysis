@@ -67,11 +67,11 @@ A Python-based tool for analyzing LinkedIn job postings based on your CV using O
      OPENAI_API_KEY=your_openai_secret_key
      ```
 
-3. **Submit Your CV**:
-   - Ensure your CV file is saved in the `user_data` folder within the project directory. The script may reference this information for analysis.
+3. **Access Fee Payment**:
+   - Deposit $5 to [OpenAI's account](https://platform.openai.com/settings/organization/billing/overview) to enable access to various ChatGPT models (`gpt-4o-mini` is used in this code for cost efficiency). Without this, the script cannot perform GPT-based analysis with this model.
 
-4. **Access Fee Payment**:
-   - Deposit $5 to OpenAI's account to enable ChatGPT access. Without this, the script cannot perform GPT-based analysis.
+4. **Submit Your CV**:
+   - Ensure your CV file is saved in the `user_data` folder within the project directory. The script may reference this information for analysis.
 
 5. **Specify the job search URL you want to parse**:
    - Go to [LinkedIn Job Search page](https://www.linkedin.com/jobs/search), adjust your preferred filters you are interested in, and copy the URL into `main.py`
