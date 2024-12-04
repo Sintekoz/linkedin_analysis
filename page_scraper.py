@@ -246,7 +246,7 @@ def scrape_linkedin_jobs(job_search_url_template):
 
         # Filter out existing job IDs from job_urls
         original_job_count = len(job_urls)
-        job_urls = [job_id for job_id in job_urls if job_id not in existing_job_ids][:20]
+        job_urls = [job_id for job_id in job_urls if job_id not in existing_job_ids]
         print(f"Filtered out {original_job_count - len(job_urls)} existing job IDs. Remaining: {len(job_urls)}")
 
         # Go through each url and scrap data
