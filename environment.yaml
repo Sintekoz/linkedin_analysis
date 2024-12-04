@@ -11,3 +11,4 @@ dependencies:
   - selenium
   - webdriver-manager
   - sqlite
+  - python-docx
