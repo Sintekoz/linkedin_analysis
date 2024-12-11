@@ -8,7 +8,7 @@ def process_ongoing_jobs():
     # Connect to the database and fetch all ongoing jobs
     conn = sqlite3.connect('linkedin_jobs.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT ji.job_id FROM job_ids ji LEFT JOIN job_application ja ON ji.job_id = ja.job_id WHERE ji.status = 'ongoing';")
+    cursor.execute("SELECT ji.job_id FROM job_ids ji WHERE ji.status = 'ongoing';")
     ongoing_jobs = cursor.fetchall()
     conn.close()
 
