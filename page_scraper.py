@@ -100,7 +100,11 @@ def init_driver():
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
 def shorten_job_url(raw_url):
-    return raw_url.split("?")[0].split('/')[-2]  # Extracts job_id
+    import re
+    match = re.search(r"/jobs/view/(?:[^/]*-)?(\d+)", raw_url or "")
+    if not match:
+        raise ValueError("Could not extract a LinkedIn job ID")
+    return match.group(1)
 
 # Main scraping function
 def login_mainpage(driver):
@@ -122,81 +126,60 @@ def login_mainpage(driver):
         password_field.send_keys(linkedin_password)
         password_field.send_keys(Keys.RETURN)
         time.sleep(10 + random.uniform(1, 3))
+        if "/login" in driver.current_url or "/checkpoint" in driver.current_url:
+            raise RuntimeError("LinkedIn requires login or verification")
         print("Logged in successfully.")
     except Exception as e:
         print(f"Error logging in: {e}")
-        driver.quit()
-        return
+        raise RuntimeError("LinkedIn login failed") from e
 
 def get_job_details(driver, job_urls):
-    for job_id in job_urls:
-
-            # Navigate to the job page
-            job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+    """Legacy collector: do not mark a posting ongoing until its details are read."""
+    from selenium.webdriver.support.ui import WebDriverWait
+    for job_id in dict.fromkeys(job_urls):
+        job_url = f"https://www.linkedin.com/jobs/view/{job_id}/"
+        try:
             driver.get(job_url)
             time.sleep(2 + random.uniform(0.5, 1))
-
-            job_status = "ongoing"  # Default status
-
-            try:
-                cancel_element = None  # Initialize with a default value
-                cancel_element_text = None  # Initialize with a default value
-
-                # Check for the cancelled job
-                try:
-                    cancel_element = driver.find_element(By.CSS_SELECTOR, "span.artdeco-inline-feedback__message")
-                    cancel_element_text = cancel_element.text
-                    if "No longer accepting applications" in cancel_element_text:
-                        job_status = "cancelled"
-                        update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
-                except NoSuchElementException:
-                    pass  # Ignore if not found
-
-                # Check for the deleted job
-                if not cancel_element_text:
-                    try:
-                        cancel_element = driver.find_element(By.CSS_SELECTOR, "p.jobs-box__body.jobs-no-job__error-msg")
-                        cancel_element_text = cancel_element.text
-                        if "The job you were looking for was not found." in cancel_element_text:
-                            job_status = "deleted"
-                            update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
-                    except NoSuchElementException:
-                    
-                        update_job_status(job_id, job_status, f"https://www.linkedin.com/jobs/view/{job_id}/")
-
-                        # Extract company_name
-                        company_element = driver.find_element(By.CLASS_NAME, "job-details-jobs-unified-top-card__company-name")
-                        company_text = company_element.text
-                        company_name = company_text.split("\n")[0].strip()
-
-                        # Extract title_name
-                        job_title_element = driver.find_element(By.CSS_SELECTOR, "h1.t-24.t-bold.inline")
-                        title_name = job_title_element.text.strip()
-                        
-                        # Extract job_description
-                        paragraphs = driver.find_elements(By.CSS_SELECTOR, "p[dir='ltr']")
-                        job_description = " ".join(
-                            [p.get_attribute('innerText').strip() for p in paragraphs if p.get_attribute('innerText').strip()]
-                        )
-
-                        # Extract location, posted_date, num_applicants
-                        try:
-                            additional_info_element = driver.find_element(By.CSS_SELECTOR, "div.t-black--light.mt2[dir='ltr']")
-                            additional_info = additional_info_element.get_attribute("innerText").strip()
-                            location, posted_date, num_applicants = (additional_info.split(" · ") + ["Not Found"] * 3)[:3]
-                        except NoSuchElementException:
-                            # If the element is not found, fill the variables with "Not Found"
-                            location, posted_date, num_applicants = "Not Found", "Not Found", "Not Found"
-
-                        # Extract work_model
-                        ui_label_elements = driver.find_elements(By.CSS_SELECTOR, "span.ui-label.ui-label--accent-3.text-body-small")
-                        work_model = " · ".join([label.text.strip() for label in ui_label_elements if label.text.strip()])
-
-                        # Insert job details into the database
-                        insert_job_details(job_id, company_name, title_name, job_description, location, posted_date, num_applicants, work_model)
-
-            except Exception as e:
-                print(f"Error processing job ID {job_id}: {e}")
+            if "/login" in driver.current_url or "/checkpoint" in driver.current_url:
+                raise RuntimeError("LinkedIn requires login or verification")
+            text = driver.find_element(By.TAG_NAME, "body").text
+            if "No longer accepting applications" in text:
+                update_job_status(job_id, "cancelled", job_url)
+                continue
+            if "The job you were looking for was not found." in text:
+                update_job_status(job_id, "deleted", job_url)
+                continue
+            title_name = WebDriverWait(driver, 15).until(
+                lambda d: d.find_element(By.CSS_SELECTOR, "h1").text.strip())
+            company_name = driver.find_element(By.CLASS_NAME,
+                "job-details-jobs-unified-top-card__company-name").text.split("\n")[0].strip()
+            descriptions = driver.find_elements(By.CSS_SELECTOR,
+                ".jobs-description__content, .jobs-box__html-content, .show-more-less-html__markup")
+            job_description = "\n".join(dict.fromkeys(e.text.strip() for e in descriptions if e.text.strip()))
+            if not company_name or not job_description:
+                raise RuntimeError("Incomplete job details; previous database record retained")
+            info = driver.find_elements(By.CSS_SELECTOR, "div.t-black--light.mt2[dir='ltr']")
+            parts = (info[0].get_attribute("innerText").split(" · ") if info else []) + [""] * 3
+            location, posted_date, num_applicants = parts[:3]
+            labels = driver.find_elements(By.CSS_SELECTOR,
+                "span.ui-label.ui-label--accent-3.text-body-small")
+            work_model = " · ".join(e.text.strip() for e in labels if e.text.strip())
+            stamp = datetime.now().strftime('%Y%m%d%H%M')
+            with sqlite3.connect('linkedin_jobs.db') as conn:
+                conn.execute("""INSERT INTO job_ids(job_id,status,timestamp_added,timestamp_updated,job_url)
+                    VALUES(?,'ongoing',?,?,?) ON CONFLICT(job_id) DO UPDATE SET
+                    status='ongoing',timestamp_updated=excluded.timestamp_updated,job_url=excluded.job_url""",
+                    (job_id, stamp, stamp, job_url))
+                conn.execute("""INSERT INTO job_description(job_id,company_name,title_name,job_description,
+                    location,posted_date,number_applicants,work_model) VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(job_id) DO UPDATE SET company_name=excluded.company_name,
+                    title_name=excluded.title_name,job_description=excluded.job_description,
+                    location=excluded.location,posted_date=excluded.posted_date,
+                    number_applicants=excluded.number_applicants,work_model=excluded.work_model""",
+                    (job_id, company_name, title_name, job_description, location, posted_date, num_applicants, work_model))
+        except Exception as error:
+            print(f"Error processing job ID {job_id}: {error}")
 
 def scrape_linkedin_jobs(job_search_url_template):
     #Login to the main page
@@ -208,7 +191,7 @@ def scrape_linkedin_jobs(job_search_url_template):
         page_number = 0
         job_urls = []
 
-        while True:
+        while page_number < 40:
             current_url = f"{job_search_url_template}&start={page_number * 25}"
             driver.get(current_url)
             time.sleep(4 + random.uniform(1, 2))
@@ -246,7 +229,7 @@ def scrape_linkedin_jobs(job_search_url_template):
 
         # Filter out existing job IDs from job_urls
         original_job_count = len(job_urls)
-        job_urls = [job_id for job_id in job_urls if job_id not in existing_job_ids]
+        job_urls = [job_id for job_id in dict.fromkeys(job_urls) if job_id not in existing_job_ids]
         print(f"Filtered out {original_job_count - len(job_urls)} existing job IDs. Remaining: {len(job_urls)}")
 
         # Go through each url and scrap data

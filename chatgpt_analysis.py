@@ -7,11 +7,6 @@ import pdfplumber  # Library for reading PDFs
 # Load environment variables from .env file
 load_dotenv()
 
-# Initialize the OpenAI client
-client = OpenAI(
-    api_key=os.environ['OPENAI_API_KEY']  # This is also the default and can be omitted if the environment variable is set
-)
-
 # Define directories
 cv_folder = "./user_data/"
 db_path = "./linkedin_jobs.db"
@@ -49,7 +44,7 @@ def extract_text_from_pdf(pdf_path):
     text = ""
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text += page.extract_text() + "\n"
+            text += (page.extract_text() or "") + "\n"
     return text.strip()
 
 def analyze_jobs_with_chatgpt(prompt_suffix):
@@ -62,6 +57,8 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
     Returns:
     - None: Saves the evaluations to the SQLite database.
     """
+
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=60, max_retries=1)
 
     # Get the most recent CV
     cv_path = get_most_recent_pdf(cv_folder)
@@ -77,7 +74,7 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
     # Ensure the chatgpt_analysis table exists
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS chatgpt_analysis (
-        job_id INTEGER PRIMARY KEY,
+        job_id TEXT PRIMARY KEY,
         chatgpt_message TEXT,
         FOREIGN KEY (job_id) REFERENCES job_ids (job_id)
     )
@@ -105,7 +102,7 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
         try:
             # Send the job description and CV to ChatGPT for evaluation
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 messages=[
                     {"role": "system", "content": "You are a career coach helping a user evaluate job positions based on their CV."},
                     {
@@ -128,6 +125,7 @@ def analyze_jobs_with_chatgpt(prompt_suffix):
             INSERT INTO chatgpt_analysis (job_id, chatgpt_message)
             VALUES (?, ?)
             """, (job_id, chatgpt_message))
+            conn.commit()
 
         except Exception as e:
             print(f"Error processing job ID {job_id}: {e}")
