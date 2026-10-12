@@ -14,6 +14,8 @@ JOB_FIELDS = ('title', 'company', 'location', 'description', 'url', 'direct_url'
               'work_model', 'job_type', 'salary_min', 'salary_max', 'currency', 'salary_interval',
               'industry', 'job_level', 'job_function', 'applicants', 'availability', 'source', 'raw_json')
 TRACK_FIELDS = ('stage', 'notes', 'follow_up', 'contact', 'applied_date')
+FIT_FIELDS = ('title', 'company', 'location', 'description', 'work_model', 'job_type',
+              'salary_min', 'salary_max', 'currency', 'salary_interval', 'industry', 'job_level', 'job_function')
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -62,6 +64,18 @@ def init(path):
         CREATE INDEX IF NOT EXISTS jobs_stage ON jobs(stage);
         CREATE INDEX IF NOT EXISTS jobs_follow_up ON jobs(follow_up);
         ''')
+        # Additive migrations preserve existing workspaces and application records.
+        migrations = {
+            'jobs': {'rating_status': "TEXT DEFAULT 'pending'", 'rating_hash': "TEXT DEFAULT ''",
+                     'rating_error': "TEXT DEFAULT ''", 'rating_model': "TEXT DEFAULT ''", 'rated_at': "TEXT DEFAULT ''"},
+            'runs': {'phase': "TEXT DEFAULT 'collecting'", 'kind': "TEXT DEFAULT 'collection'",
+                     'rated': 'INTEGER DEFAULT 0', 'cached': 'INTEGER DEFAULT 0', 'unrated': 'INTEGER DEFAULT 0'},
+        }
+        for table, fields in migrations.items():
+            existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
+            for name, definition in fields.items():
+                if name not in existing:
+                    db.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+definition)
 
 def canonical_url(value):
     value = str(value or '').strip()
@@ -121,6 +135,8 @@ def upsert(db, data, tracking=False):
         job_id = existing['id']
         # Preserve richer details when a refresh returns missing fields.
         values = {k: v for k, v in values.items() if tracking or v not in (None, '') or k in TRACK_FIELDS}
+        if any(k in values and values[k] != existing[k] for k in FIT_FIELDS):
+            values.update(rating_status='pending', rating_error='Job details changed; waiting for a fresh rating.')
         db.execute('UPDATE jobs SET ' + ','.join(k + '=?' for k in values) + ' WHERE id=?',
                    [*values.values(), job_id])
         return job_id, False

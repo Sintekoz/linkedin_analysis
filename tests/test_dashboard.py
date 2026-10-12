@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import os
 import subprocess
 import sys
+import time
 from dashboard import store
 from dashboard.collectors import normalize, validate_config
 from dashboard.server import App, Handler
@@ -92,7 +93,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(len(snapshot['jobs']),1)
         self.assertEqual(snapshot['runs'][0]['status'],'failed')
         self.assertEqual(snapshot['runs'][0]['added'],1)
-        self.assertEqual(snapshot['runs'][0]['message'],'Provider blocked')
+        self.assertIn('Provider blocked',snapshot['runs'][0]['message'])
     def test_run_lifecycle_and_restart(self):
         with store.connect(self.path) as db:
             db.execute("INSERT INTO runs(name,config,status,started_at) VALUES('Test','{}','running',?)",(store.now(),))
@@ -121,7 +122,7 @@ class WorkspaceTests(unittest.TestCase):
         sid=self.app.mutate('/api/sources',{'name':'Test','config':{'keywords':'Analyst','location':'Dublin'}})['id']
         popen=subprocess.Popen
         def sleeper(*args,**kwargs):
-            return popen([sys.executable,'-c','import time; time.sleep(30)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            return popen([sys.executable,'-c','import time; time.sleep(30)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         with patch('dashboard.server.subprocess.Popen',sleeper):
             rid=self.app.start(sid)['id']
             process=self.app.processes[rid]
@@ -130,30 +131,47 @@ class WorkspaceTests(unittest.TestCase):
             self.app.stop(rid)
         self.assertIsNotNone(process.poll())
         self.assertEqual(self.app.snapshot()['runs'][0]['status'],'cancelled')
-    def test_missing_ai_key_does_not_affect_browsing(self):
+    def test_missing_codex_login_does_not_affect_browsing(self):
         jid=self.add(description='SQL')
-        with patch.dict(os.environ,{'OPENAI_API_KEY':''}):
-            with self.assertRaisesRegex(ValueError,'OPENAI_API_KEY'):
+        self.app.mutate('/api/settings',{'cv_text':'Test CV'})
+        with patch('dashboard.rating.cli_status',return_value={'ready':False,'message':'Sign in with ChatGPT'}):
+            with self.assertRaisesRegex(ValueError,'ChatGPT'):
                 self.app.ai(jid,'analyze')
         self.assertEqual(len(self.app.snapshot()['jobs']),1)
-    def test_mocked_ai_persists_analysis_and_letter(self):
+        self.assertEqual(self.app.snapshot()['jobs'][0]['rating_status'],'blocked')
+    @unittest.skipUnless(os.name == 'posix', 'POSIX worker process groups')
+    def test_stop_terminates_nested_rating_process(self):
+        heartbeat=Path(self.temp.name)/'child-heartbeat.txt'
+        child="import sys,time; from pathlib import Path; p=Path(sys.argv[1]);\nwhile True:\n p.write_text(str(time.time())); time.sleep(0.02)"
+        parent="import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); time.sleep(30)"
+        popen=subprocess.Popen
+        def nested(*args,**kwargs):
+            return popen([sys.executable,'-c',parent,child,str(heartbeat)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        sid=self.app.mutate('/api/sources',{'name':'Test','config':{'keywords':'Analyst','location':'Dublin'}})['id']
+        with patch('dashboard.server.subprocess.Popen',nested):
+            rid=self.app.start(sid)['id']
+            deadline=time.monotonic()+3
+            while not heartbeat.exists() and time.monotonic()<deadline:
+                time.sleep(0.02)
+            self.assertTrue(heartbeat.exists())
+            self.app.stop(rid)
+        last=heartbeat.read_text()
+        time.sleep(0.1)
+        self.assertEqual(heartbeat.read_text(),last)
+    def test_mocked_codex_persists_analysis_and_letter(self):
         jid=self.add(description='SQL')
         self.app.mutate('/api/settings',{'cv_text':'Test candidate with SQL experience.'})
-        client=Mock()
-        client.chat.completions.create.return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":8,"summary":"Strong SQL fit","strengths":["SQL"],"gaps":[]}'))])
-        fake=SimpleNamespace(OpenAI=Mock(return_value=client))
-        with patch.dict(sys.modules,{'openai':fake}),patch.dict(os.environ,{'OPENAI_API_KEY':'test-only'}):
+        review={'score':8,'summary':'Strong SQL fit','strengths':['SQL'],'gaps':[]}
+        with patch('dashboard.rating.cli_status',return_value={'ready':True}),patch('dashboard.rating.review_batch',return_value={jid:review}):
             self.app.ai(jid,'analyze')
-            self.assertEqual(json.loads(self.app.snapshot()['jobs'][0]['analysis'])['score'],8)
-            client.chat.completions.create.return_value.choices[0].message.content='Dear hiring team'
+        self.assertEqual(json.loads(self.app.snapshot()['jobs'][0]['analysis'])['score'],8)
+        with patch('dashboard.rating.cli_json',return_value={'letter':'Dear hiring team'}):
             self.app.ai(jid,'letter')
-            self.assertEqual(self.app.snapshot()['jobs'][0]['cover_letter'],'Dear hiring team')
+        self.assertEqual(self.app.snapshot()['jobs'][0]['cover_letter'],'Dear hiring team')
     def test_invalid_ai_score_is_not_persisted(self):
         jid=self.add(description='SQL')
         self.app.mutate('/api/settings',{'cv_text':'Test CV'})
-        client=Mock()
-        client.chat.completions.create.return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":999}'))])
-        with patch.dict(sys.modules,{'openai':SimpleNamespace(OpenAI=Mock(return_value=client))}),patch.dict(os.environ,{'OPENAI_API_KEY':'test-only'}):
+        with patch('dashboard.rating.cli_status',return_value={'ready':True}),patch('dashboard.rating.cli_json',return_value={'reviews':[{'id':jid,'score':999}]}):
             with self.assertRaisesRegex(ValueError,'invalid score'):
                 self.app.ai(jid,'analyze')
         self.assertEqual(self.app.snapshot()['jobs'][0]['analysis'],'')
