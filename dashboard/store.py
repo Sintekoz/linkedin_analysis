@@ -8,11 +8,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+from .locations import classify_location
 
 STAGES = ('discovered', 'saved', 'applied', 'interview', 'offer', 'rejected', 'withdrawn')
 JOB_FIELDS = ('title', 'company', 'location', 'description', 'url', 'direct_url', 'posted_date',
               'work_model', 'job_type', 'salary_min', 'salary_max', 'currency', 'salary_interval',
-              'industry', 'job_level', 'job_function', 'applicants', 'availability', 'source', 'raw_json')
+              'industry', 'job_level', 'job_function', 'applicants', 'availability', 'source', 'raw_json',
+              'location_status', 'location_note')
 TRACK_FIELDS = ('stage', 'notes', 'follow_up', 'contact', 'applied_date')
 FIT_FIELDS = ('title', 'company', 'location', 'description', 'work_model', 'job_type',
               'salary_min', 'salary_max', 'currency', 'salary_interval', 'industry', 'job_level', 'job_function')
@@ -67,15 +69,21 @@ def init(path):
         # Additive migrations preserve existing workspaces and application records.
         migrations = {
             'jobs': {'rating_status': "TEXT DEFAULT 'pending'", 'rating_hash': "TEXT DEFAULT ''",
-                     'rating_error': "TEXT DEFAULT ''", 'rating_model': "TEXT DEFAULT ''", 'rated_at': "TEXT DEFAULT ''"},
+                     'rating_error': "TEXT DEFAULT ''", 'rating_model': "TEXT DEFAULT ''", 'rated_at': "TEXT DEFAULT ''",
+                     'location_status': "TEXT DEFAULT 'unclear'", 'location_note': "TEXT DEFAULT ''"},
             'runs': {'phase': "TEXT DEFAULT 'collecting'", 'kind': "TEXT DEFAULT 'collection'",
-                     'rated': 'INTEGER DEFAULT 0', 'cached': 'INTEGER DEFAULT 0', 'unrated': 'INTEGER DEFAULT 0'},
+                     'rated': 'INTEGER DEFAULT 0', 'cached': 'INTEGER DEFAULT 0', 'unrated': 'INTEGER DEFAULT 0',
+                     'rating_error': "TEXT DEFAULT ''"},
         }
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
             for name, definition in fields.items():
                 if name not in existing:
                     db.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+definition)
+        # Existing records predate location labels; keep stages/notes intact.
+        for row in db.execute("SELECT id,title,location,work_model FROM jobs WHERE location_note='' OR location_note IS NULL").fetchall():
+            evidence = classify_location(dict(row))
+            db.execute('UPDATE jobs SET location_status=?,location_note=? WHERE id=?', (*evidence.values(), row['id']))
 
 def canonical_url(value):
     value = str(value or '').strip()

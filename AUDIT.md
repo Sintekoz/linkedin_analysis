@@ -21,7 +21,7 @@ Audited original commit `977624f` on 12 October 2026. Scope: every tracked sourc
 
 [JobSpy's upstream documentation](https://github.com/speedyapply/JobSpy) describes LinkedIn support, richer job metadata, optional description requests, country support and rate limiting. It avoids maintaining the project's own authenticated Selenium search implementation. This is a pragmatic replacement, not a guarantee of completeness or uninterrupted access. Missing fields are retained as unknown; sources can omit salary or descriptions. Salary intervals are stored as supplied rather than silently converting hourly wages to annual figures.
 
-Only LinkedIn is implemented, following the owner's request. If broader coverage is added later, direct employer feeds are useful candidates: [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html) provides public postings with optional description content, and [Lever Postings API](https://github.com/lever/postings-api) provides JSON job feeds. These APIs are future options, not shipped integrations.
+The initial release focused on LinkedIn. The 13 October expansion adds Indeed/Glassdoor and implements the public employer feeds documented by: [Greenhouse Job Board API](https://docs.greenhouse.io/job-board.html) provides public postings with optional description content, and [Lever Postings API](https://github.com/lever/postings-api) provides JSON job feeds. Greenhouse and Lever GET feeds are shipped integrations; application-submission endpoints are not called.
 
 ## Verification
 
@@ -41,3 +41,17 @@ LinkedIn collection can be blocked or incomplete. JobSpy can return an empty dat
 The original manual API-button flow has been replaced in the dashboard with automatic Luna ratings after each LinkedIn collection. Jobs commit before model work, and a failed scrape still attempts to rate any saved records. Validated reviews retain score, strengths/gaps, model, fingerprint and rating timestamp. Database migrations only add columns; existing jobs and application records are preserved. Profile or job edits mark scores as pending rather than displaying stale reviews as current. No scheduler or continuously active chat is introduced.
 
 Codex model access, authentication, connectivity and subscription limits remain external dependencies. Missing descriptions cannot produce evidence-based scores. The model's assessment is advisory and can be wrong; the library retains all postings and provides an All jobs filter.
+
+## Multi-platform expansion · 13 October 2026
+
+Added Indeed and Glassdoor through the installed JobSpy integration, with country-aware configuration and correct provider provenance. Added direct Greenhouse and Lever adapters with complete description sections, original salary intervals where supplied, explicit missing posting dates, known-host board configuration, verified TLS and bounded scans. Runtime uses the existing trusted certificate bundle when available; certificate verification is never disabled.
+
+Added an independently advancing queue for Run all searches, immutable run configurations, workflow cancellation and restart recovery. Model failures stop remaining queued model requests; collection failures remain visible while other sources continue. New location labels separate skills ratings from Ireland/remote hiring evidence. The candidate’s stated work permission informs ratings; it is not verified by the app, and broader remote regions require employer confirmation. Personal permission details and CV-based search configuration remain only in ignored local data.
+
+Live preflight checks retrieved two Ireland roles with descriptions from each of Indeed and Glassdoor, and verified Greenhouse feeds for Intercom/Fivetran and Lever feeds for Dun & Bradstreet/CarTrawler. End-to-end run counts are recorded in the local dashboard history.
+
+The live expansion workflow ran all 27 saved searches (26 newly added plus the existing search) with a first-pass cap of three results per search. The workspace holds 58 unique jobs across all five platforms: 33 LinkedIn, 9 Indeed, 6 Glassdoor, 6 Greenhouse and 4 Lever. After refreshing earlier records against the updated profile, 45 have current ratings and 10 score at least 7/10 with Ireland/remote-region location evidence. Thirteen LinkedIn records lack descriptions and remain visibly unscored. These are local run observations, not a guarantee of future source availability or employer eligibility.
+
+Live inspection also found that the installed JobSpy LinkedIn adapter ignores remote/type parameters. Added local metadata enforcement and a remote keyword, blocking-log reporting, and respectful spacing between subsequent LinkedIn searches. Forty-two regression tests cover the shipped workflow, including these guards and location-label backfill without changes to application tracking.
+
+A final small LinkedIn remote-filter smoke request encountered provider denial/rate limiting. The new log guard surfaced this as a failed run instead of reporting a successful empty collection. Existing jobs and ratings remained intact; no bypass or repeated retries were attempted.

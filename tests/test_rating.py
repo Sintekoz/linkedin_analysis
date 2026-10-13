@@ -17,9 +17,12 @@ class AutomaticRatingTests(unittest.TestCase):
         self.app.mutate('/api/settings', {'cv_text': 'Four years of Python and SQL.', 'target_role': 'Data Analyst'})
         self.ready = patch('dashboard.rating.cli_status', return_value={'ready': True, 'model': rating.MODEL})
         self.ready.start()
+        self.spacing = patch('dashboard.worker.collection_wait', return_value=0)
+        self.spacing.start()  # Timing is covered separately; these tests exercise rating behavior.
 
     def tearDown(self):
         self.ready.stop()
+        self.spacing.stop()
         self.temp.cleanup()
 
     def new_run(self):

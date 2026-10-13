@@ -18,8 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 from . import store
-from .collectors import validate_config
+from .collectors import validate_config, PROVIDERS
 from . import rating
+from .locations import classify_location
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / 'dashboard' / 'static'
@@ -34,7 +35,7 @@ class App:
         self.rating_checked = 0
         store.init(self.path)
         with store.connect(self.path) as db:
-            db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status='running'", (store.now(),))
+            db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status IN ('running','queued')", (store.now(),))
 
     def snapshot(self):
         self.reap()
@@ -46,7 +47,7 @@ class App:
                 sources=[dict(r) | {'config': json.loads(r['config'])} for r in db.execute('SELECT * FROM sources ORDER BY id DESC')],
                 runs=[dict(r) for r in db.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 100')],
                 settings={r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM settings')},
-                stages=store.STAGES, jobspy=bool(importlib.util.find_spec('jobspy')), rating=self.rating_info, token=self.token)
+                stages=store.STAGES, providers=PROVIDERS, jobspy=bool(importlib.util.find_spec('jobspy')), rating=self.rating_info, token=self.token)
 
     def reap(self):
         with self.lock:
@@ -54,7 +55,11 @@ class App:
                 code = process.poll()
                 if code is not None:
                     with store.connect(self.path) as db:
-                        db.execute("UPDATE runs SET status='failed',message='Collector process exited unexpectedly.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
+                        db.execute("UPDATE runs SET status='failed',message='Background process exited unexpectedly.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
+                        outcome = db.execute('SELECT rating_error FROM runs WHERE id=?', (rid,)).fetchone()
+                        if outcome and outcome['rating_error']:
+                            db.execute("UPDATE runs SET status='cancelled',message=?,finished_at=? WHERE status='queued'",
+                                       ('Workflow stopped because ratings need attention: '+outcome['rating_error'], store.now()))
                     del self.processes[rid]
                 else:
                     with store.connect(self.path) as db:
@@ -64,6 +69,22 @@ class App:
                     limit = 1800 if phase == 'rating' else 600
                     if time.monotonic() - process.phase_started > limit:
                         self.stop(rid, 'timed_out', 'Stopped after the '+('30 minute rating' if phase == 'rating' else '10 minute collection')+' limit. Saved jobs and ratings are retained.')
+            self.launch_next()
+
+    def launch_next(self):
+        if self.processes:
+            return
+        with store.connect(self.path) as db:
+            row = db.execute("SELECT id FROM runs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            if not row:
+                return
+            rid = row['id']
+            db.execute("UPDATE runs SET status='running',phase='collecting',started_at=?,message='Collecting jobs; ratings will follow automatically.' WHERE id=?", (store.now(), rid))
+        try:
+            self.launch(rid)
+        except Exception:
+            with store.connect(self.path) as db:
+                db.execute("UPDATE runs SET status='cancelled',message='Workflow stopped: a background worker could not start.',finished_at=? WHERE status='queued'", (store.now(),))
 
     def launch(self, rid, phase='collecting'):
         try:
@@ -88,8 +109,46 @@ class App:
                 if not source:
                     raise LookupError('Search not found.')
                 rid = db.execute("INSERT INTO runs(source_id,name,config,status,message,started_at) VALUES(?,?,?,'running',?,?)",
-                    (source_id, source['name'], source['config'], 'Fetching LinkedIn results. Full descriptions can take a few minutes.', store.now())).lastrowid
+                    (source_id, source['name'], source['config'], 'Fetching jobs. Full descriptions can take a few minutes.', store.now())).lastrowid
             return self.launch(rid)
+
+    def start_all(self, data):
+        with self.lock:
+            self.reap()
+            if self.processes:
+                raise ValueError('A workflow is already running. Wait or stop it first.')
+            override = data.get('limit')
+            if override is not None and (type(override) is not int or not 1 <= override <= 100):
+                raise ValueError('The per-search limit must be an integer from 1 to 100.')
+            requested = data.get('source_ids')
+            if requested is not None and (not isinstance(requested, list) or not requested or
+                    len(requested) > 100 or any(type(i) is not int for i in requested)):
+                raise ValueError('Choose up to 100 source IDs.')
+            with store.connect(self.path) as db:
+                sources = db.execute('SELECT * FROM sources ORDER BY id').fetchall()
+                if requested is not None:
+                    if not set(requested) <= {s['id'] for s in sources}:
+                        raise LookupError('A selected search was not found.')
+                    sources = [s for s in sources if s['id'] in requested]
+                if not sources or len(sources) > 100:
+                    raise ValueError('Add at least one search; a workflow can run up to 100 searches.')
+                ids = []
+                for source in sources:
+                    config = validate_config(json.loads(source['config']))
+                    if override is not None:
+                        config['limit'] = min(config['limit'], override)
+                    ids.append(db.execute("INSERT INTO runs(source_id,name,config,status,phase,message,started_at) VALUES(?,?,?,'queued','queued',?,?)",
+                        (source['id'], source['name'], json.dumps(config), 'Waiting for the previous search and ratings to finish.', store.now())).lastrowid)
+            self.launch_next()
+            return {'ids': ids, 'queued': len(ids)}
+
+    def stop_all(self, status='cancelled', message='Workflow stopped. Saved jobs and ratings are retained.'):
+        with self.lock:
+            with store.connect(self.path) as db:
+                db.execute('UPDATE runs SET status=?,message=?,finished_at=? WHERE status=?', (status, message, store.now(), 'queued'))
+            for rid in list(self.processes):
+                self.stop(rid, status, message)
+            return {'ok': True}
 
     def start_ratings(self):
         with self.lock:
@@ -130,7 +189,7 @@ class App:
                     process.wait()
                 self.processes.pop(rid, None)
             with store.connect(self.path) as db:
-                db.execute('UPDATE runs SET status=?,message=?,finished_at=? WHERE id=? AND status=?', (status, message, store.now(), rid, 'running'))
+                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE id=? AND status IN ('running','queued')", (status, message, store.now(), rid))
             return {'ok': True}
 
     def mutate(self, route, data):
@@ -140,10 +199,17 @@ class App:
         if route == '/api/jobs':
             with store.connect(self.path) as db:
                 jid, created = store.upsert(db, data, tracking=True)
+                job = dict(db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone())
+                location = classify_location(job)
+                db.execute('UPDATE jobs SET location_status=?,location_note=? WHERE id=?', (*location.values(), jid))
             return {'id': jid, 'created': created}
         if len(bits) == 3 and bits[:2] == ['api', 'jobs']:
             store.update_tracking(self.path, bits[2], data)
             return {'ok': True}
+        if route == '/api/sources/run-all':
+            return self.start_all(data)
+        if route == '/api/runs/stop-all':
+            return self.stop_all()
         if route == '/api/sources' or (len(bits) == 3 and bits[:2] == ['api', 'sources']):
             name = str(data.get('name') or '').strip()
             if not name:
@@ -162,7 +228,7 @@ class App:
         if len(bits) == 4 and bits[:2] == ['api', 'runs'] and bits[3] == 'stop':
             return self.stop(int(bits[2]))
         if route == '/api/settings':
-            allowed = {'skills', 'target_role', 'cv_text', 'analysis_prompt'}
+            allowed = set(rating.PROFILE_FIELDS)
             with store.connect(self.path) as db:
                 before = rating.settings_from(db)
                 for key in allowed & data.keys():
@@ -337,8 +403,7 @@ def main():
     finally:
         monitor_stop.set()
         monitor_thread.join(timeout=5)
-        for rid in list(app.processes):
-            app.stop(rid, 'interrupted', 'Dashboard stopped.')
+        app.stop_all('interrupted', 'Dashboard stopped. Saved jobs and ratings are retained.')
         server.server_close()
 
 if __name__ == '__main__':
