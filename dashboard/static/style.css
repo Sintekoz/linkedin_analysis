@@ -11,3 +11,5 @@
 @media(max-width:780px){.topbar{height:auto;min-height:70px;flex-wrap:wrap;gap:10px;padding-top:12px;padding-bottom:12px}.top-actions{flex-wrap:wrap}.top-actions .local-pill{display:none}#workflow-start{font-size:11px;padding:10px 12px}}
 
 .similar-note{display:block;margin-top:3px}
+
+.job-cell>div{min-width:0}.job-cell strong{display:block;max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.job-cell small{display:block;max-width:230px;white-space:normal}
