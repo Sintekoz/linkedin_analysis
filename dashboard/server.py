@@ -43,7 +43,8 @@ class App:
             self.rating_info = rating.cli_status()
             self.rating_checked = time.monotonic()
         with store.connect(self.path) as db:
-            return dict(jobs=[dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY created_at DESC')],
+            return dict(jobs=store.library(db),
+                duplicates=db.execute("SELECT count(*) FROM jobs WHERE duplicate_of!=''").fetchone()[0],
                 sources=[dict(r) | {'config': json.loads(r['config'])} for r in db.execute('SELECT * FROM sources ORDER BY id DESC')],
                 runs=[dict(r) for r in db.execute("SELECT * FROM runs WHERE status IN ('running','queued') OR id IN (SELECT id FROM runs ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
                 settings={r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM settings')},
@@ -123,7 +124,7 @@ class App:
                     (source_id, source['name'], source['config'], 'Fetching jobs. Full descriptions can take a few minutes.', store.now())).lastrowid
             return self.launch(rid)
 
-    def start_all(self, data):
+    def start_all(self, data, include_waiting=False):
         with self.lock:
             self.reap()
             if self.processes:
@@ -141,9 +142,13 @@ class App:
                     if not set(requested) <= {s['id'] for s in sources}:
                         raise LookupError('A selected search was not found.')
                     sources = [s for s in sources if s['id'] in requested]
-                if not sources:
+                waiting = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' AND duplicate_of='' ORDER BY created_at DESC")] if include_waiting else []
+                if not sources and not waiting:
                     raise ValueError('Add at least one search.')
                 ids = []
+                if waiting:
+                    ids.append(db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'queued','rating','queued',?,?)",
+                        ('Existing job ratings', json.dumps({'job_ids': waiting}), 'Existing jobs will be checked automatically before collecting more.', store.now())).lastrowid)
                 for source in sources:
                     config = validate_config(json.loads(source['config']))
                     if 'limit' in data:
@@ -152,6 +157,17 @@ class App:
                         (source['id'], source['name'], json.dumps(config), 'Waiting for the previous search and ratings to finish.', store.now())).lastrowid)
             self.launch_next()
             return {'ids': ids, 'queued': len(ids)}
+
+    def start_workflow(self):
+        with self.lock:
+            self.reap()
+            if self.processes:
+                # Repeated clicks must not enqueue another scrape or rating.
+                return {'active': True, 'ids': list(self.processes)}
+            with store.connect(self.path) as db:
+                duplicates = store.reconcile_duplicates(db)
+            result = self.start_all({}, include_waiting=True)
+            return result | {'duplicates': duplicates}
 
     def stop_all(self, status='cancelled', message='Workflow stopped. Saved jobs and ratings are retained.'):
         with self.lock:
@@ -167,7 +183,7 @@ class App:
             if self.processes:
                 raise ValueError('A collection or rating is already running. Wait or stop it first.')
             with store.connect(self.path) as db:
-                ids = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' ORDER BY created_at DESC")]
+                ids = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' AND duplicate_of='' ORDER BY created_at DESC")]
                 if not ids:
                     raise ValueError('No jobs are waiting for a rating.')
                 rid = db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'running','rating','rating',?,?)",
@@ -207,6 +223,8 @@ class App:
         if not isinstance(data, dict):
             raise ValueError('Expected a JSON object.')
         bits = route.strip('/').split('/')
+        if route == '/api/workflow/start':
+            return self.start_workflow()
         if route == '/api/jobs':
             with store.connect(self.path) as db:
                 jid, created = store.upsert(db, data, tracking=True)
@@ -256,16 +274,31 @@ class App:
                 raise ValueError('Import must contain a jobs array with up to 5,000 jobs.')
             added = 0
             with store.connect(self.path) as db:
+                imported_ids = {}
                 for row in rows:
                     if not isinstance(row, dict):
                         raise ValueError('Every imported job must be an object.')
                     jid, created = store.upsert(db, row, tracking=True)
+                    if row.get('id'):
+                        imported_ids[str(row['id'])] = jid
                     added += int(created)
                     for field in ('analysis', 'cover_letter'):
-                        if row.get(field):
+                        if row.get(field) and not row.get('duplicate_of'):
                             db.execute('UPDATE jobs SET '+field+'=? WHERE id=?', (str(row[field]), jid))
                             if field == 'analysis':
                                 db.execute("UPDATE jobs SET rating_status='pending',rating_hash='',rating_error='Imported review needs verification against your current profile.' WHERE id=?", (jid,))
+                links = data.get('links', [])
+                if not isinstance(links, list) or len(links)>20000:
+                    raise ValueError('Backup source links must be an array of up to 20,000 links.')
+                for link in links:
+                    if not isinstance(link, dict) or not isinstance(link.get('source','manual'), str):
+                        raise ValueError('Invalid backup source link.')
+                    jid = imported_ids.get(str(link.get('job_id') or ''))
+                    url = store.canonical_url(link.get('url'))
+                    if not jid or not url:
+                        raise ValueError('Backup links must identify an imported job and a valid URL.')
+                    db.execute('INSERT OR IGNORE INTO job_links(url,job_id,source) VALUES(?,?,?)', (url,jid,str(link.get('source') or 'manual')[:100]))
+                store.reconcile_duplicates(db)
             return {'added': added, 'updated': len(rows)-added}
         if len(bits) == 4 and bits[:2] == ['api', 'jobs'] and bits[3] in ('analyze', 'letter'):
             return self.ai(bits[2], bits[3])
@@ -331,7 +364,8 @@ class Handler(BaseHTTPRequestHandler):
         elif route == '/api/export':
             with store.connect(app.path) as db:
                 jobs = [dict(r) for r in db.execute('SELECT * FROM jobs')]
-            self.reply(200, {'version': 1, 'exported_at': store.now(), 'jobs': jobs}, disposition='attachment; filename="job-search-backup.json"')
+                links = [dict(r) for r in db.execute('SELECT * FROM job_links')]
+            self.reply(200, {'version': 2, 'exported_at': store.now(), 'jobs': jobs, 'links': links}, disposition='attachment; filename="job-search-backup.json"')
         elif route == '/api/export.csv':
             with store.connect(app.path) as db:
                 rows = [dict(r) for r in db.execute('SELECT * FROM jobs')]

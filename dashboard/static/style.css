@@ -7,3 +7,7 @@
 .filters>input{flex:1 1 250px;width:auto;min-width:190px}.filters>select{width:auto;flex:0 0 auto;max-width:100%}.filters .check-label{margin:0;white-space:nowrap;gap:5px}.filters .check-label input{flex:none;min-width:0;width:14px;height:14px;padding:0;margin:0}
 .platform-icon{display:flex;align-items:center;justify-content:center;background:#e8eff4;color:#357599;font-weight:700;width:40px;height:40px;border-radius:8px;flex-shrink:0}.platform-icon.indeed{background:#e8edfa;color:#244eab}.platform-icon.glassdoor,.platform-icon.greenhouse{background:#e4f1e7;color:#28734a}.platform-icon.lever{background:#f1e9f8;color:#7f529c}.source-query{font-size:12px;font-weight:550}.source-rationale{font-size:11px;color:var(--muted);margin-top:8px}.workflow-banner{display:flex;align-items:center;justify-content:space-between;gap:16px}.workflow-banner p{font-size:11px}.badge.queued,.badge.remote_check{background:#fff1d6;color:#98742d}.search-guidance{font-size:11px}@media(max-width:780px){.workflow-banner{flex-direction:column;align-items:flex-start}}
 .jobs-table td:nth-child(2){max-width:250px;min-width:150px;white-space:normal}.badge.waiting{background:#fff1d6;color:#98742d}
+
+@media(max-width:780px){.topbar{height:auto;min-height:70px;flex-wrap:wrap;gap:10px;padding-top:12px;padding-bottom:12px}.top-actions{flex-wrap:wrap}.top-actions .local-pill{display:none}#workflow-start{font-size:11px;padding:10px 12px}}
+
+.similar-note{display:block;margin-top:3px}

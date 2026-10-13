@@ -171,7 +171,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_invalid_ai_score_is_not_persisted(self):
         jid=self.add(description='SQL')
         self.app.mutate('/api/settings',{'cv_text':'Test CV'})
-        with patch('dashboard.rating.cli_status',return_value={'ready':True}),patch('dashboard.rating.cli_json',return_value={'reviews':[{'id':jid,'score':999}]}):
+        with patch('dashboard.rating.cli_status',return_value={'ready':True}),patch('dashboard.rating.cli_json',return_value={'reviews':{'job_1':{'score':999,'summary':'Invalid','strengths':[],'gaps':[]}}}):
             with self.assertRaisesRegex(ValueError,'invalid score'):
                 self.app.ai(jid,'analyze')
         self.assertEqual(self.app.snapshot()['jobs'][0]['analysis'],'')

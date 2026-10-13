@@ -111,14 +111,50 @@ class AutomaticRatingTests(unittest.TestCase):
         self.assertEqual(self.jobs()[0]['analysis'], '')
         self.assertEqual(self.app.snapshot()['runs'][0]['status'], 'cancelled')
 
-    def test_mismatched_job_ids_reject_whole_batch(self):
+    def test_mismatched_job_slots_reject_whole_batch(self):
         with store.connect(self.path) as db:
             jid, _ = store.upsert(db, {'title': 'Analyst', 'description': 'Python'})
             job = dict(db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone())
-        payload = {'reviews': [{'id': 'another-job', 'score': 8, 'summary': 'Wrong', 'strengths': [], 'gaps': []}]}
+        payload = {'reviews': {'job_99': {'score': 8, 'summary': 'Wrong', 'strengths': [], 'gaps': []}}}
         with patch('dashboard.rating.cli_json', return_value=payload):
-            with self.assertRaisesRegex(ValueError, 'mismatched job IDs'):
+            with self.assertRaisesRegex(ValueError, 'mismatched job slots'):
                 rating.review_batch([job], {'cv_text': 'SQL'})
+
+    def test_schema_requires_every_short_slot_and_maps_reordered_reviews_safely(self):
+        with store.connect(self.path) as db:
+            for jid in ('long-database-id-one','long-database-id-two'):
+                store.upsert(db, {'id':jid,'title':'Analyst','description':'SQL'})
+            jobs=[dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY id')]
+        review={'score':8,'summary':'SQL match','strengths':['SQL'],'gaps':[]}
+        payload={'reviews':{'job_2':review|{'score':7},'job_1':review}}
+        with patch('dashboard.rating.cli_json',return_value=payload) as model:
+            result=rating.review_batch(jobs,{'cv_text':'SQL'})
+        self.assertEqual(result[jobs[0]['id']]['score'],8)
+        self.assertEqual(result[jobs[1]['id']]['score'],7)
+        prompt,schema=model.call_args.args
+        self.assertNotIn('long-database-id',prompt)
+        slots=schema['properties']['reviews']
+        self.assertEqual(slots['required'],['job_1','job_2'])
+        self.assertFalse(slots['additionalProperties'])
+
+    def test_one_malformed_response_is_retried_automatically(self):
+        with store.connect(self.path) as db:
+            jid,_=store.upsert(db,{'title':'Analyst','description':'SQL'})
+            job=dict(db.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone())
+        with patch('dashboard.rating.review_batch',side_effect=[rating.ReviewFormatError('Malformed output'),self.reviews([job],{})]) as model:
+            counts=rating.rate_jobs(self.path,[jid])
+        self.assertEqual(model.call_count,2)
+        self.assertEqual(counts['rated'],1)
+        self.assertEqual(self.jobs()[0]['rating_status'],'complete')
+
+    def test_a_second_malformed_response_stops_without_saving_wrong_scores(self):
+        with store.connect(self.path) as db:
+            ids=[store.upsert(db,{'id':str(n),'title':'Analyst','description':'SQL'})[0] for n in range(12)]
+        with patch('dashboard.rating.review_batch',side_effect=rating.ReviewFormatError('Malformed output')) as model:
+            counts=rating.rate_jobs(self.path,ids)
+        self.assertEqual(model.call_count,2)
+        self.assertEqual(counts['unrated'],12)
+        self.assertTrue(all(not job['analysis'] for job in self.jobs()))
 
     def test_api_credentials_are_removed_and_api_login_cannot_rate(self):
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'test-only', 'CODEX_API_KEY': 'test-only'}):
