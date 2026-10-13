@@ -73,7 +73,9 @@ def init(path):
                      'location_status': "TEXT DEFAULT 'unclear'", 'location_note': "TEXT DEFAULT ''"},
             'runs': {'phase': "TEXT DEFAULT 'collecting'", 'kind': "TEXT DEFAULT 'collection'",
                      'rated': 'INTEGER DEFAULT 0', 'cached': 'INTEGER DEFAULT 0', 'unrated': 'INTEGER DEFAULT 0',
-                     'rating_error': "TEXT DEFAULT ''"},
+                     'rating_error': "TEXT DEFAULT ''", 'pages': 'INTEGER DEFAULT 0',
+                     'scanned': 'INTEGER DEFAULT 0', 'heartbeat': "TEXT DEFAULT ''",
+                     'collection_note': "TEXT DEFAULT ''", 'provider_blocked': 'INTEGER DEFAULT 0'},
         }
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}

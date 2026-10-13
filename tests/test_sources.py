@@ -166,14 +166,16 @@ class WorkflowTests(unittest.TestCase):
         with store.connect(self.path) as db:
             self.assertTrue(all(r['status'] == 'cancelled' for r in db.execute('SELECT status FROM runs')))
 
-    def test_model_failure_stops_later_queue_requests(self):
-        with patch('dashboard.server.subprocess.Popen', return_value=FakeProcess()) as launch:
+    def test_model_failure_defers_ratings_but_keeps_collection_queue_running(self):
+        with patch('dashboard.server.subprocess.Popen', side_effect=lambda *a, **k: FakeProcess()) as launch:
             ids = self.app.start_all({})['ids']
             self.finish(ids[0], 'Subscription limit reached')
             self.app.reap()
-            self.assertEqual(launch.call_count, 1)
+            self.assertEqual(launch.call_count, 2)
         with store.connect(self.path) as db:
-            self.assertEqual(db.execute("SELECT count(*) FROM runs WHERE status='cancelled'").fetchone()[0], 2)
+            later = db.execute('SELECT status,config FROM runs WHERE id>?', (ids[0],)).fetchall()
+            self.assertEqual([r['status'] for r in later], ['running', 'queued'])
+            self.assertTrue(all(json.loads(r['config'])['rating_paused'] == 'Subscription limit reached' for r in later))
 
     def test_restart_does_not_silently_resume_a_queue(self):
         with store.connect(self.path) as db:

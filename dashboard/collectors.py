@@ -4,6 +4,8 @@ import json
 import math
 import re
 import logging
+import time
+from collections import deque
 from datetime import date, datetime
 from .ats import collect_ats
 from urllib.parse import urlsplit, parse_qs
@@ -12,14 +14,18 @@ PROVIDERS = {'linkedin': 'LinkedIn', 'indeed': 'Indeed', 'glassdoor': 'Glassdoor
              'greenhouse': 'Greenhouse', 'lever': 'Lever'}
 
 
+class ProviderBlocked(RuntimeError):
+    """Stop this platform's workflow requests after an explicit denial."""
+
+
 class ProviderMessages(logging.Handler):
     def __init__(self):
         super().__init__()
-        self.messages = []
+        self.messages = deque(maxlen=100)
 
     def emit(self, record):
-        if len(self.messages) < 100:
-            self.messages.append(record.getMessage()[:1000])
+        if record.levelno >= logging.WARNING:
+            self.messages.append((record.levelno, record.getMessage()[:1000]))
 
 
 def validate_config(data):
@@ -33,13 +39,14 @@ def validate_config(data):
         raise ValueError('Keywords and location are required.')
     if config['job_type'] not in ('', 'fulltime', 'parttime', 'contract', 'internship'):
         raise ValueError('Unsupported job type.')
-    try:
-        config['limit'] = int(data.get('limit', 25))
-        config['hours_old'] = int(data.get('hours_old', 168))
-    except (ValueError, TypeError):
-        raise ValueError('Result limit and age must be numbers.')
-    if not 1 <= config['limit'] <= 100 or not 1 <= config['hours_old'] <= 2160:
-        raise ValueError('Use 1–100 results and a posting age of 1–2160 hours.')
+    for field in ('limit', 'hours_old'):
+        value = data.get(field)
+        if value is None or value == '':
+            config[field] = None  # No user-selected result cap or date filter.
+        else:
+            if isinstance(value, bool) or not re.fullmatch(r'[0-9]+', str(value)) or int(value) < 1:
+                raise ValueError('Optional result limit and posting age must be positive whole numbers, or blank for all.')
+            config[field] = int(value)
     config['remote'] = bool(data.get('remote', False))
     config['description'] = bool(data.get('description', True))
     config['country'] = str(data.get('country') or 'Ireland').strip()[:60]
@@ -98,10 +105,10 @@ def normalize(row, provider='linkedin'):
         raw_json=json.dumps(r, default=str))
 
 
-def collect(config):
+def collect(config, progress=None):
     config = validate_config(config)
     if config['provider'] in ('greenhouse', 'lever'):
-        yield from collect_ats(config)
+        yield from collect_ats(config, progress)
         return
     try:
         from jobspy import scrape_jobs
@@ -113,7 +120,7 @@ def collect(config):
     if config['provider'] == 'linkedin' and config['remote'] and 'remote' not in query.lower():
         query += ' remote'
     args = dict(site_name=[config['provider']], search_term=query, location=config['location'],
-                results_wanted=config['limit'], hours_old=config['hours_old'], description_format='markdown', verbose=1)
+                hours_old=config['hours_old'], description_format='markdown', verbose=1)
     # JobSpy renamed this option; support both released signatures.
     key = 'fetch_description' if 'fetch_description' in inspect.signature(scrape_jobs).parameters else 'linkedin_fetch_description'
     args[key] = config['description']
@@ -124,22 +131,62 @@ def collect(config):
     if config['job_type']:
         args['job_type'] = config['job_type']
     logger = logging.getLogger('JobSpy:'+PROVIDERS[config['provider']])
-    messages = ProviderMessages()
-    logger.addHandler(messages)
-    try:
-        frame = scrape_jobs(**args)
-    finally:
-        logger.removeHandler(messages)
-    for row in frame.to_dict(orient='records')[:config['limit']]:
-        job = normalize(row, config['provider'])
-        if config['provider'] == 'linkedin':
-            if config['remote']:
-                if not re.search(r'\bremote\b', job['work_model']+' '+str(job['title']), re.I):
-                    continue
-                if not job['work_model']:
-                    job['work_model'] = 'Remote'
-            if config['job_type'] and config['job_type'] not in re.sub(r'[^a-z]', '', job['job_type'].lower()):
+    # LinkedIn's installed adapter advances by ten native cards per page. Larger
+    # requests hide intermediate saves and may skip cards when stopped mid-page.
+    page_size = 10 if config['provider'] == 'linkedin' else 100
+    seen, offset, found, scanned, pages = set(), 0, 0, 0, 0
+    def report(note):
+        if progress:
+            progress(pages, scanned, note)
+    while True:
+        report(f"Requesting {PROVIDERS[config['provider']]} results from position {offset + 1}…")
+        messages = ProviderMessages()
+        logger.addHandler(messages)
+        try:
+            frame = scrape_jobs(**args, results_wanted=page_size, offset=offset)
+        finally:
+            logger.removeHandler(messages)
+        rows = frame.to_dict(orient='records')
+        pages += 1
+        scanned += len(rows)
+        report(f'Received batch {pages}; checking and saving {len(rows)} returned jobs…')
+        new = 0
+        for row in rows:
+            identity = str(row.get('job_url') or row.get('id') or json.dumps(clean(row), sort_keys=True, default=str))
+            if identity in seen:
                 continue
-        yield job
-    if any(re.search(r'\b(?:403|429)\b', m) and 'status' in m.lower() or 'blocked' in m.lower() for m in messages.messages):
-        raise RuntimeError(PROVIDERS[config['provider']]+' denied or rate-limited one or more requests. Any collected jobs are retained; retry after a break.')
+            seen.add(identity)
+            new += 1
+            job = normalize(row, config['provider'])
+            if config['provider'] == 'linkedin':
+                if config['remote']:
+                    if not re.search(r'\bremote\b', job['work_model']+' '+str(job['title']), re.I):
+                        continue
+                    if not job['work_model']:
+                        job['work_model'] = 'Remote'
+                if config['job_type'] and config['job_type'] not in re.sub(r'[^a-z]', '', job['job_type'].lower()):
+                    continue
+            if config['limit'] is None or found < config['limit']:
+                yield job
+                found += 1
+        errors = [m for level, m in messages.messages if level >= logging.ERROR]
+        if any(re.search(r'\b(?:403|429)\b', m) and 'status' in m.lower() or 'blocked' in m.lower()
+               for _, m in messages.messages):
+            raise ProviderBlocked(PROVIDERS[config['provider']]+' denied or rate-limited one or more requests. Any collected jobs are retained; retry after a break.')
+        if errors:
+            raise RuntimeError(PROVIDERS[config['provider']]+' could not finish collection: '+errors[0])
+        if config['limit'] is not None and found >= config['limit']:
+            report('Reached your optional result limit.')
+            return
+        if not rows:
+            report('No further results returned. This can mean the end of accessible results or provider throttling; coverage is not guaranteed.')
+            return
+        if not new:
+            report('The source repeated previously returned results. Stopped to avoid an endless loop; coverage is not guaranteed.')
+            return
+        if len(rows) < page_size:
+            report('The source returned a final partial batch. No further results were exposed; coverage is not guaranteed.')
+            return
+        offset += page_size
+        report('Saved this batch; waiting briefly before requesting more results…')
+        time.sleep(5)

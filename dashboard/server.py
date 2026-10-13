@@ -45,7 +45,7 @@ class App:
         with store.connect(self.path) as db:
             return dict(jobs=[dict(r) for r in db.execute('SELECT * FROM jobs ORDER BY created_at DESC')],
                 sources=[dict(r) | {'config': json.loads(r['config'])} for r in db.execute('SELECT * FROM sources ORDER BY id DESC')],
-                runs=[dict(r) for r in db.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 100')],
+                runs=[dict(r) for r in db.execute("SELECT * FROM runs WHERE status IN ('running','queued') OR id IN (SELECT id FROM runs ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
                 settings={r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM settings')},
                 stages=store.STAGES, providers=PROVIDERS, jobspy=bool(importlib.util.find_spec('jobspy')), rating=self.rating_info, token=self.token)
 
@@ -56,19 +56,30 @@ class App:
                 if code is not None:
                     with store.connect(self.path) as db:
                         db.execute("UPDATE runs SET status='failed',message='Background process exited unexpectedly.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
-                        outcome = db.execute('SELECT rating_error FROM runs WHERE id=?', (rid,)).fetchone()
+                        outcome = db.execute('SELECT rating_error,provider_blocked,config FROM runs WHERE id=?', (rid,)).fetchone()
                         if outcome and outcome['rating_error']:
-                            db.execute("UPDATE runs SET status='cancelled',message=?,finished_at=? WHERE status='queued'",
-                                       ('Workflow stopped because ratings need attention: '+outcome['rating_error'], store.now()))
+                            for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
+                                config = json.loads(queued['config'])
+                                config['rating_paused'] = outcome['rating_error']
+                                db.execute('UPDATE runs SET config=?,message=? WHERE id=?',
+                                           (json.dumps(config), 'Collection will continue; ratings need attention and will wait for a later retry.', queued['id']))
+                        if outcome and outcome['provider_blocked']:
+                            provider = json.loads(outcome['config']).get('provider', 'linkedin')
+                            for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
+                                if json.loads(queued['config']).get('provider', 'linkedin') == provider:
+                                    db.execute("UPDATE runs SET status='paused',message=?,finished_at=? WHERE id=?",
+                                               (PROVIDERS[provider]+' denied or rate-limited access. Remaining searches on this platform were paused; retry after a break. Other platforms continue.', store.now(), queued['id']))
                     del self.processes[rid]
                 else:
                     with store.connect(self.path) as db:
-                        phase = db.execute('SELECT phase FROM runs WHERE id=?', (rid,)).fetchone()[0]
-                    if phase != process.phase:
-                        process.phase, process.phase_started = phase, time.monotonic()
-                    limit = 1800 if phase == 'rating' else 600
-                    if time.monotonic() - process.phase_started > limit:
-                        self.stop(rid, 'timed_out', 'Stopped after the '+('30 minute rating' if phase == 'rating' else '10 minute collection')+' limit. Saved jobs and ratings are retained.')
+                        row = db.execute('SELECT phase,heartbeat FROM runs WHERE id=?', (rid,)).fetchone()
+                    activity = (row['phase'], row['heartbeat'])
+                    if activity != getattr(process, 'activity', None):
+                        process.activity, process.phase_started = activity, time.monotonic()
+                    # A healthy large search/rating can run as long as it is making
+                    # progress. Terminate only a stalled worker, not an elapsed budget.
+                    if time.monotonic() - process.phase_started > 600:
+                        self.stop(rid, 'timed_out', 'Stopped after ten minutes without progress. Saved jobs and ratings are retained.')
             self.launch_next()
 
     def launch_next(self):
@@ -118,25 +129,25 @@ class App:
             if self.processes:
                 raise ValueError('A workflow is already running. Wait or stop it first.')
             override = data.get('limit')
-            if override is not None and (type(override) is not int or not 1 <= override <= 100):
-                raise ValueError('The per-search limit must be an integer from 1 to 100.')
+            if override is not None and (type(override) is not int or override < 1):
+                raise ValueError('The optional per-search limit must be a positive integer.')
             requested = data.get('source_ids')
             if requested is not None and (not isinstance(requested, list) or not requested or
-                    len(requested) > 100 or any(type(i) is not int for i in requested)):
-                raise ValueError('Choose up to 100 source IDs.')
+                    any(type(i) is not int for i in requested)):
+                raise ValueError('Choose valid source IDs.')
             with store.connect(self.path) as db:
                 sources = db.execute('SELECT * FROM sources ORDER BY id').fetchall()
                 if requested is not None:
                     if not set(requested) <= {s['id'] for s in sources}:
                         raise LookupError('A selected search was not found.')
                     sources = [s for s in sources if s['id'] in requested]
-                if not sources or len(sources) > 100:
-                    raise ValueError('Add at least one search; a workflow can run up to 100 searches.')
+                if not sources:
+                    raise ValueError('Add at least one search.')
                 ids = []
                 for source in sources:
                     config = validate_config(json.loads(source['config']))
-                    if override is not None:
-                        config['limit'] = min(config['limit'], override)
+                    if 'limit' in data:
+                        config['limit'] = override
                     ids.append(db.execute("INSERT INTO runs(source_id,name,config,status,phase,message,started_at) VALUES(?,?,?,'queued','queued',?,?)",
                         (source['id'], source['name'], json.dumps(config), 'Waiting for the previous search and ratings to finish.', store.now())).lastrowid)
             self.launch_next()
@@ -156,7 +167,7 @@ class App:
             if self.processes:
                 raise ValueError('A collection or rating is already running. Wait or stop it first.')
             with store.connect(self.path) as db:
-                ids = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' ORDER BY created_at DESC LIMIT 100")]
+                ids = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' ORDER BY created_at DESC")]
                 if not ids:
                     raise ValueError('No jobs are waiting for a rating.')
                 rid = db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'running','rating','rating',?,?)",

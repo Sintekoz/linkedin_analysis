@@ -122,38 +122,61 @@ def matches(job, config):
     return True
 
 
-def collect_ats(config):
+def collect_ats(config, progress=None):
     found = 0
+    scanned, pages, seen = 0, 0, set()
+    def report(note):
+        if progress:
+            progress(pages, scanned, note)
     if config['provider'] == 'greenhouse':
         host = 'boards-api.greenhouse.io'
+        report('Reading all published roles from the employer feed…')
         payload = read_json('https://'+host+'/v1/boards/'+quote(config['board'], safe='')+'/jobs?content=true')
         if not isinstance(payload, dict) or not isinstance(payload.get('jobs'), list):
             raise RuntimeError('Greenhouse returned an unexpected feed format.')
         rows = sorted(payload['jobs'], key=lambda r: str(r.get('updated_at') or ''), reverse=True)
+        pages, scanned = 1, len(rows)
+        report(f'Checking {scanned} published employer postings…')
         for row in rows:
             job = greenhouse_job(row, config)
-            if matches(job, config):
+            if job['id'] not in seen and matches(job, config):
+                seen.add(job['id'])
                 yield job
                 found += 1
-                if found >= config['limit']:
+                if config['limit'] is not None and found >= config['limit']:
+                    report('Reached your optional result limit.')
                     return
+        report('Checked the complete published employer feed.')
     else:
         host = 'api.eu.lever.co' if config['region'] == 'eu' else 'api.lever.co'
-        # Bound pagination; no crawl of application pages or submissions.
-        for skip in range(0, 2000, 100):
+        skip = 0
+        while True:
+            report(f'Reading employer postings from position {skip + 1}…')
             query = {'mode': 'json', 'limit': 100, 'skip': skip}
             if config.get('board_location'):
                 query['location'] = config['board_location']
             rows = read_json('https://'+host+'/v0/postings/'+quote(config['board'], safe='')+'?'+urlencode(query))
             if not isinstance(rows, list):
                 raise RuntimeError('Lever returned an unexpected feed format.')
+            pages += 1
+            scanned += len(rows)
+            report(f'Checking employer batch {pages}; {scanned} postings scanned…')
+            new = 0
             for row in rows:
                 job = lever_job(row, config)
+                if job['id'] in seen:
+                    continue
+                seen.add(job['id'])
+                new += 1
                 if matches(job, config):
                     yield job
                     found += 1
-                    if found >= config['limit']:
+                    if config['limit'] is not None and found >= config['limit']:
+                        report('Reached your optional result limit.')
                         return
             if len(rows) < 100:
+                report('Checked all postings exposed by the employer feed.')
                 return
-        raise RuntimeError('Lever reached the 2,000-posting scan limit. Narrow the exact board location filter; saved results are retained.')
+            if not new:
+                raise RuntimeError('Employer feed repeated the same page. Stopped to avoid an endless loop; saved jobs are retained.')
+            skip += 100

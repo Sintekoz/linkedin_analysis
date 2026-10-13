@@ -84,7 +84,7 @@ class WorkspaceTests(unittest.TestCase):
         with store.connect(self.path) as db:
             source=db.execute('SELECT * FROM sources WHERE id=?',(sid,)).fetchone()
             rid=db.execute("INSERT INTO runs(name,config,status,started_at) VALUES(?,?,'running',?)",('Test',source['config'],store.now())).lastrowid
-        def broken(_):
+        def broken(_, progress=None):
             yield {'title':'Analyst','url':'https://www.linkedin.com/jobs/view/123/'}
             raise RuntimeError('Provider blocked')
         with patch('dashboard.worker.collect',broken):
@@ -101,7 +101,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(restarted.snapshot()['runs'][0]['status'],'interrupted')
     def test_search_filter_validation_and_legacy_filters(self):
         with self.assertRaises(ValueError):
-            validate_config({'keywords':'Analyst','location':'Dublin','limit':10000})
+            validate_config({'keywords':'Analyst','location':'Dublin','limit':0})
         config=validate_config({'keywords':'Analyst','location':'Dublin','remote':True})
         self.assertTrue(config['remote'])
         url=format_job_search_url('https://www.linkedin.com/jobs/search/?keywords=data&f_E=3%2C4&f_JT=F&start=25&currentJobId=123')
