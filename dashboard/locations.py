@@ -4,6 +4,7 @@ import re
 IRELAND = re.compile(r'\b(ireland|dublin|cork|galway|limerick|waterford|kilkenny|sligo|athlone|naas|kildare|wexford|drogheda|dundalk|bray|donegal|letterkenny|portlaoise|tralee)\b', re.I)
 REGIONS = re.compile(r'\b(europe|european|emea|eu|worldwide|global|anywhere)\b', re.I)
 REMOTE = re.compile(r'\bremote\b', re.I)
+FOREIGN = re.compile(r'\b(united states|usa|us|canada|united kingdom|uk|england|scotland|wales|ohio|california|ontario)\b', re.I)
 
 
 def classify_location(job):
@@ -11,7 +12,9 @@ def classify_location(job):
     remote = REMOTE.search(location+' '+str(job.get('work_model') or '')+' '+str(job.get('title') or ''))
     # Northern Ireland is a UK location. An Irish city must be named separately.
     republic = re.sub(r'\bnorthern\s+ireland\b', '', location, flags=re.I)
-    if IRELAND.search(republic):
+    # City names such as Dublin also occur outside Ireland.
+    ireland_evidence = IRELAND.search(republic) and (not FOREIGN.search(location) or re.search(r'\bireland\b', republic, re.I))
+    if ireland_evidence:
         return {'location_status': 'ireland', 'location_note': 'An Ireland location is advertised. Confirm the employer’s requirements and your current permission before applying.'}
     if remote and REGIONS.search(location):
         return {'location_status': 'remote_check', 'location_note': 'The advertised remote region may include Ireland. Confirm the employer can hire/payroll someone working from Ireland; regional wording is not confirmation.'}

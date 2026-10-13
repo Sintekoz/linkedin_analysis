@@ -105,6 +105,11 @@ class SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'rate-limited'):
                 next(iterator)
 
+    def test_irish_city_names_in_foreign_postings_are_not_ireland_evidence(self):
+        for location in ('Dublin, Ohio, United States', 'Dublin, California, USA', 'Waterford, Ontario, Canada'):
+            self.assertEqual(classify_location({'location':location})['location_status'],'outside_target')
+        self.assertEqual(classify_location({'location':'Dublin, Ireland; London, England'})['location_status'],'ireland')
+
 
 class FakeProcess:
     def __init__(self):
