@@ -1,0 +1,2 @@
+openai>=1.50,<3
+python-dotenv>=1,<2

@@ -1,0 +1,19 @@
+name: Dashboard checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m unittest discover -s tests -v
+      - run: python -m compileall -q dashboard main.py page_scraper.py chatgpt_analysis.py cl_generator.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check dashboard/static/app.js

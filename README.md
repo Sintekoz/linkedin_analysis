@@ -1,130 +1,170 @@
-### My contacts if you have any questions/suggestions or if you want to communicate something:
-E-mail: iegorshelestov@gmail.com LinkedIn: https://www.linkedin.com/in/iegor-shelestov/
+# LinkedIn Analysis · Next Role
 
----
+A local HTML workspace for job-board and employer-feed jobs and your application pipeline. The website is served by Python and stores your data in SQLite on your computer. No frontend build, Node runtime, LinkedIn password or OpenAI key is required. Automatic fit ratings use a Codex ChatGPT login and the Luna model.
 
-# LinkedIn Analysis
+## Start
 
-A Python-based tool for analyzing LinkedIn job postings based on your CV using OpenAI's GPT models. This project allows you to extract and analyze job postings based on a LinkedIn search URL and provides insights tailored to your custom prompts and CV.
+Python 3.11+ is recommended. On macOS, double-click **start.command** or run:
 
-## Features
+```sh
+python3 main.py --port 8876
+```
 
-- Scrape job postings from LinkedIn using Selenium.
-- Analyze job descriptions with OpenAI's GPT models.
-- Get tailored insights based on your custom prompts.
-- Generate a cover letter specifically for the job position you want
+Open **http://127.0.0.1:8876**. The server opens your browser automatically unless `--no-browser` is passed. Keep the terminal open; press Ctrl+C to stop it. If that port is occupied, choose another with `--port`.
 
----
+### Enable job-board collection
 
-## Requirements
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-scraping.txt
+python main.py --port 8876
+```
 
-- **Python**: Make sure Python is installed on your system.
-- **Conda**: Make sure Conda is installed on your system.
-- **LinkedIn Account**: Required for accessing LinkedIn.
-- **OpenAI API Key**: Required for using GPT models.
-- **CV Submission**: Your CV must be placed in the `user_data` folder before running the script.
-- **Access Fee**: A $5 deposit must be made to OpenAI's account to enable access to the ChatGPT model.
+The checked-in `requirements-lock.txt` records the full environment used for validation (including optional AI dependencies). To reproduce it, install that file instead.
 
----
+Create a saved search under **Job searches**, select LinkedIn, Indeed, Glassdoor, Greenhouse or Lever, and configure keywords and location. **All available results** and **Any posting date** are the defaults: there is no dashboard quantity cap or age cutoff. Leave **Optional result limit** blank to collect all accessible matches, or set a positive number when you want a smaller run. Job boards also support posting age, job type and remote filters. Indeed and Glassdoor use an explicit country (Ireland by default). Greenhouse and Lever take the employer’s board name/careers link and employer name; title alternatives can be separated with `|`. Employer feeds search published roles and do not invent posting dates.
 
-## Installation
+Click **Find & rate jobs** in the top bar on any page. One click groups confirmed duplicates and starts independent discovery, description-recovery and rating queues. Searches rotate one page at a time rather than finishing a broad query before starting the next. A turn is a scheduling unit, not a total result cap: saved offsets continue through later rounds until the source exposes no further new results. LinkedIn discovery requests metadata only; Indeed and Glassdoor retain any descriptions returned in search results. New or changed descriptions trigger automatic Luna ratings, while unchanged fingerprints reuse existing reviews. Confirmed closed and not-interested jobs do not consume new automatic rating calls.
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/Sintekoz/linkedin_analysis.git
-   cd linkedin_analysis
-   ```
+Queues commit each saved batch and resume after restart. The dashboard runs independently of this chat and the browser. Repeat clicks return the existing workflow; **Stop workflow** cancels active, idle and delayed steps while retaining saved data. Per-search **Run** uses the same pipeline for targeted collection. The queue has no 100-search ceiling. JobSpy uses ten returned jobs per LinkedIn page and 100 per Indeed/Glassdoor page. All LinkedIn queries share a durable search cooldown and a 30-second interval. Healthy platforms can progress while that endpoint waits. Greenhouse reads complete feeds; Lever rotates through pages of 100 without an artificial total cap.
 
-2. **Create the environment**:
-   ```bash
-   conda env create --file=environment.yaml
-   ```
+**Description recovery** deduplicates by the saved posting owner, reuses existing descriptions, prioritizes exact Greenhouse/Lever employer links, and then reads supported public posting pages. Descriptions must match the exact posting URL or matching main title; recommendation snippets and sign-in pages are rejected. Glassdoor recovery uses the optional JobSpy batch detail adapter for exact posting IDs (up to 25 per request), with its own persistent cache and cooldown. Its normal anonymous session initialization is performed; no login cookies are loaded or saved. This version-dependent adapter falls back when unavailable. Unsupported links, missing descriptions and blocked access remain explicit pending/attention states, with no invented scores. Recovery has checkpoints and bounded retries independent of search failures. Public scraping never uses stored login cookies, CAPTCHA solving or a stealth browser.
 
-3. **Activate the environment**:
-   ```bash
-   conda activate linkedin_analysis
-   ```
+**Add employer feeds** installs an idempotent catalog for Stripe, Datadog, MongoDB, Elastic, Canonical and Toast, with data/analytics/financial-system and related title alternatives and Ireland/remote scope. The catalog was verified on 14 October 2026; availability can change. Exact Greenhouse/Lever links discovered in collection can add the employer board to the active workflow automatically. Existing board configurations are retained. Europe/EMEA remote leads still need employer confirmation of hiring from Ireland.
 
----
+**Shared response cache** persists successful public responses for 15 minutes across discovery, enrichment and closure checks. Stale responses use ETag/Last-Modified conditional requests when supported. Failed responses and sign-in walls are not cached as job evidence. A closure check can reuse the description it just fetched and queue a rating if the description changed. Endpoint health survives restart, honors Retry-After when exposed by direct GET requests, and separates LinkedIn search from LinkedIn details. JobSpy search logs expose status codes but not Retry-After headers; those searches use bounded backoff. Full descriptions and profile/job fingerprints avoid repeat model calls.
 
-## Configuration
+The overall tracker shows unique search matches → descriptions available → ratings ready, searches started, pending/unsupported recovery, retrieval success (source batches and direct public reads), responses reused and cooldown skips. It also reports strong Ireland-advertised leads per hour; this is a workflow productivity measure, not proof of employer-confirmed immigration or remote hiring eligibility. Detailed history remains available below the summary.
 
-1. **Set up environment variables**:
-   - Rename the `.env.example` file to `.env`:
-     ```bash
-     mv .env.example .env
-     ```
-   - Add your LinkedIn credentials to the `.env` file:
-     ```text
-     LINKEDIN_USERNAME=your_username
-     LINKEDIN_PASSWORD=your_password
-     ```
+**All available** means everything exposed by the configured source/query, not a guarantee of all vacancies on that platform. Collection ends when the source returns a partial/empty batch or repeats results. [JobSpy documents upstream search windows of roughly 1,000 postings on many job-board endpoints](https://github.com/speedyapply/JobSpy#notes); the installed LinkedIn adapter itself stops at offset 1,000. Changing the dashboard cannot remove these upstream constraints. Explicit denials and errors appear in history, with partial results retained. A 403/429 pauses remaining searches on that platform for this workflow; other platforms continue. Retry the paused searches after a break. The tested JobSpy version ignores LinkedIn remote/type parameters. Remote searches add the remote term; missing metadata is retained for enrichment rather than being discarded as a failed match.
 
-2. **Add OpenAI API Key**:
-   - Obtain your OpenAI API key from [OpenAI](https://platform.openai.com/account/api-keys).
-   - Add the key to the `.env` file:
-     ```text
-     OPENAI_API_KEY=your_openai_secret_key
-     ```
+A rating/authentication/subscription failure pauses later model requests while collection continues. Jobs remain visible and the next **Find & rate jobs** workflow handles waiting ratings once the issue clears; unchanged valid ratings are still reused. **Stop workflow** cancels waiting work and terminates the active worker and its Codex children, preserving committed data. A restart resumes recoverable workflow queues from saved progress; explicitly stopped queues stay stopped. Healthy collection/rating runs have no total elapsed deadline; ten minutes without reported progress terminates a stalled worker. Each model batch retains a three-minute request timeout.
 
-3. **Access Fee Payment**:
-   - Deposit $5 to [OpenAI's account](https://platform.openai.com/settings/organization/billing/overview) to enable access to various ChatGPT models (`gpt-4o-mini` is used in this code for cost efficiency). Without this, the script cannot perform GPT-based analysis with this model.
+## What you can manage
 
-4. **Submit Your CV**:
-   - Ensure your CV file is saved in the `user_data` folder within the project directory. The script may reference this information for analysis.
+- **Overview:** strongest matches (7/10 or higher), application counts, interviews, follow-ups due and collection/rating activity.
+- **Job library:** relevant jobs (7/10 or higher) first, sorted by fit. Choose All jobs or Waiting / needs attention to inspect every collected posting. Search descriptions, titles, companies and locations; filter by stage, fit or remote work; sort by date, company, follow-up or AI score.
+- **Applications:** saved → applied → interview → offer / rejected. Open a card to change stages. Discovered and withdrawn jobs remain in the library.
+- **Job details:** edit metadata, inspect descriptions, store contact information, notes, application dates and follow-ups, and view activity. Opening a posting does not submit an application or change its stage.
+- **Job searches:** create, edit, run and remove saved searches across five platforms, with CV-based rationale, the Find & rate jobs workflow and persistent run history.
+- **Profile:** target role, skills, CV text and fit preferences. Skills are literal text coverage, not an AI suitability score.
+- **Portability:** export applications as CSV or jobs as JSON, and import JSON from the Profile page. JSON backups include application tracking, AI results and cover letters. Importing matching jobs updates any tracking fields present in the import. Imported AI reviews are retained as reference data and marked pending until rated against your current profile.
 
-5. **Specify the job search URL you want to parse**:
-   - Go to [LinkedIn Job Search page](https://www.linkedin.com/jobs/search), adjust your preferred filters you are interested in, and copy the URL into `main.py`
----
+The UI starts empty. Missing salary, descriptions, applicant counts and work models are never fabricated. Collection refreshes deduplicate by posting identity and preserve your application tracking. Posting availability is separate from application stage: missing search results never imply closure. You can set availability manually in Edit details; the workflow checks supported public posting evidence automatically.
 
-## Usage
+## Automatic ratings through your Codex subscription
 
-1. Open the `main.py` file and update the following:
-   - **Search URL**: Replace the placeholder with your desired LinkedIn search URL.
-   - **ChatGPT Prompt**: Customize the prompt for the type of analysis you want to perform.
+The independent rating queue automatically rates each eligible new or changed job with a full description against your Profile CV and preferences using **gpt-6-luna**, with low reasoning effort. No per-job rating button is needed. Jobs without descriptions, a configured CV, or successful model access remain visible with an explanation under **Waiting / needs attention**; scores are never fabricated.
 
-   Example:
-   ```python
-   search_url = "https://www.linkedin.com/jobs/search/?keywords=data%20analyst"
-   analysis_prompt = "Provide a summary of the key skills and qualifications required for these roles."
-   ```
+Install a current [Codex CLI](https://learn.chatgpt.com/docs/cli), then run `codex login` and choose **ChatGPT**. The dashboard also discovers the CLI bundled with the macOS ChatGPT app. Profile displays login readiness. An explicit executable can be supplied through `JOB_SEARCH_CODEX_BINARY`. The tested bundled CLI version is `0.162.0-alpha.17.2`; older CLI versions may need updating for the flags used by this integration. No credentials are copied or stored by this project.
 
-2. Run the script:
-   ```bash
-   python main.py
-   ```
+Ratings run in a separate, short-lived process, in batches of up to five jobs. **This chat does not need to stay open.** Keep the local Python dashboard running while collecting and rating. Model execution is hosted by OpenAI; the website and database remain local. The CV, target role, skills, preferences and job metadata/description are supplied to OpenAI for each uncached batch.
 
----
+The CLI runs with an explicit Luna model override, ChatGPT-only authentication, isolated temporary working directory, read-only sandbox, ephemeral session, no user configuration, no shell tools, no app/plugin integrations, no multi-agent tools, and no web search. API key environment variables are removed; there is no API or more expensive model fallback. [Codex authentication](https://learn.chatgpt.com/docs/auth), [non-interactive execution](https://learn.chatgpt.com/docs/non-interactive-mode), and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) document the underlying capabilities.
 
-## How It Works
+Cached ratings are reused when job evidence, your profile, model and scoring rubric match. Tracking notes and collection timestamps do not trigger another rating. A changed CV/preferences or job description invalidates the displayed score; the next collection of that posting refreshes it. **Find & rate jobs** also checks all existing waiting records after setup, description or request issues are fixed. Ordinary collection rates jobs automatically. The waiting-jobs view is for inspection; no per-job rating action is required. Profile updates do not silently start a full-library rating batch.
 
-1. **Data Collection**:
-   - The script uses Selenium to scrape job postings from the provided LinkedIn search URL.
+Ratings and development use the same [Codex subscription allowance](https://learn.chatgpt.com/docs/pricing). The smaller model and cached/batched requests help control usage; they do not create a separate token pool. Model access and subscription limits may interrupt ratings. Malformed responses receive one automatic retry. Each batch uses short, schema-required job slots rather than asking the model to copy database IDs. A second formatting failure or a model/authentication/subscription failure stops further model requests for that run and leaves remaining jobs inspectable for a later workflow. Run history reports rated, reused and attention-needed counts.
 
-2. **Analysis**:
-   - Job descriptions are sent to OpenAI's GPT models for analysis based on your custom prompt.
+**Draft cover letter** remains an optional action for a selected job. It also uses Luna through the ChatGPT login and saves a downloadable text draft. Review ratings and letters before relying on them. The separate legacy `chatgpt_analysis.py` and `cl_generator.py JOB_ID` workflows still use API keys and their legacy dependencies (`requirements-ai.txt` / `environment.yaml`); the new dashboard does not call those scripts.
 
-3. **Output**:
-   - The script outputs insights and analysis to the terminal or generates a report (customizable).
+## Database & backups
 
----
+Default database: `data/job_search.db`. Its location is anchored to this checkout. Override with `--db /absolute/path/workspace.db`.
 
-## Contributing
+For a complete backup of profile, searches, activity and jobs, **stop the dashboard and copy the SQLite database**. JSON export is a job backup, not a full workspace backup. Data files, `.env`, CVs and generated letters are ignored by Git.
 
-Contributions are welcome! Please fork the repository and submit a pull request for any feature enhancements or bug fixes.
+An original database can be imported read-only and repeatedly:
 
----
+```sh
+python main.py --legacy-db /absolute/path/linkedin_jobs.db --port 8876
+```
 
-## License
+The original file is not modified; application tracking in the new database is retained on repeated legacy imports.
 
-This project is licensed under the [MIT License](LICENSE).
+## Ireland and remote-location checks
 
----
+Profile includes the country you will work from and your stated work permission. These are supplied to the rating worker as candidate context, not verified by the app. Nationality is not a suitability penalty. Work-permission details are excluded from cover-letter prompts.
 
-## Acknowledgements
+Every collected role receives a separate location-evidence label: Ireland advertised, remote region requiring Ireland hiring confirmation, unclear location, or outside the target. Northern Ireland is treated as a UK location. A Europe/EMEA/global remote label is a lead requiring employer confirmation, not a guarantee of Irish payroll or work authorization. The library defaults to Ireland/remote leads; **All locations** retains access to all stored records. Employer feeds can filter before storage to Ireland and plausible remote regions.
 
-- [LinkedIn](https://www.linkedin.com) for job data.
-- [OpenAI](https://openai.com) for their GPT models.
-- [Conda](https://docs.conda.io) for environment management.
+## Scope and architecture
 
----
+`dashboard/static/` is buildless HTML/CSS/JavaScript. `dashboard/server.py` exposes a small local API. `dashboard/store.py` owns persistence, `dashboard/collectors.py` normalizes JobSpy job-board data; `dashboard/ats.py` reads public Greenhouse and Lever feeds; `dashboard/locations.py` labels location evidence, and `dashboard/worker.py` runs collection and ratings in an isolated process. `dashboard/rating.py` handles Codex execution, structured result validation, caching and rating provenance. It binds only to `127.0.0.1`, rejects unexpected Host/Origin headers, checks a per-process token for writes and renders provider text without HTML execution. It is a personal local tool, not a public multi-user server.
+
+Original Selenium functions remain in `page_scraper.py` and `check_cancelled.py` for users maintaining that pipeline, but the new entry point starts the dashboard. They require the dependencies in `environment.yaml` and a Chrome setup. The legacy selectors still depend on LinkedIn's DOM and were not live-tested. New collection uses JobSpy instead.
+
+LinkedIn, Indeed, Glassdoor, Greenhouse and Lever are enabled. Greenhouse uses its global public board API; Lever supports global and EU board endpoints. Public employer feeds use verified TLS, bounded responses/pagination and GET requests only. Google Jobs is not enabled because JobSpy currently documents it as unavailable. ZipRecruiter is not enabled for this Ireland-focused workflow because its documented coverage is US/Canada. There is no unattended scheduling, automatic job application submission or CAPTCHA bypass.
+
+## Validation
+
+```sh
+python -m unittest discover -s tests -v
+python -m compileall -q dashboard main.py page_scraper.py chatgpt_analysis.py cl_generator.py
+node --check dashboard/static/app.js  # optional developer check; Node not needed to run
+```
+
+Tests exercise canonical deduplication, tracking preservation, atomic import validation, backup round trips, read-only legacy migration, collection failure persistence, interrupted runs, filter preservation, HTTP writes and CSRF/Host/Origin checks, CSV formula escaping, automatic collection-to-rating execution, cached ratings, profile/job invalidation, provider/model failures, cancellation and API-login rejection. See [AUDIT.md](AUDIT.md) for findings and remaining limits.
+
+
+## Duplicate handling
+
+The workflow identifies repeated native posting IDs, normalizes known board URLs and strips marketing parameters. An individual employer posting URL can link the same vacancy across platforms. It keeps one visible entry, retains the discovered source links, preserves application tracking and reuses a current rating. Existing confirmed duplicates are grouped without deleting their original database rows. JSON backups include source-link provenance; CSV exports retain the underlying application records.
+
+A shared company/title/location or identical description alone is not enough to merge jobs: employers reuse titles and templates for different requisitions. Similar listings stay separate and are noted in the library/details. Generic careers and search URLs cannot establish cross-platform identity. Separately tracked applications with different stages or notes are retained independently.
+
+
+## Dublin and remote filters
+
+The job library defaults to **Dublin + remote**. Dublin postal districts, repeated county labels and known provider codes normalize to Dublin, Ireland; County Dublin locations such as Swords and Sandyford are included. Use **Dublin only** or **Remote · Ireland / to confirm** for narrower views.
+
+Remote results include advertised Ireland locations, broad Europe/EMEA/global regions and unspecified remote locations requiring confirmation. Explicit foreign-country restrictions take precedence over vague regional labels. Hybrid roles elsewhere in Ireland are not treated as remote. Original location text remains in job details and saved source data. Normalization is derived for display/filtering and does not overwrite job evidence, application tracking or cached fit ratings.
+
+## Overall tracking and recovery
+
+**Find & rate jobs** now creates one durable workflow. Its overview shows processed search/rating steps, unique jobs, newly added jobs, refreshed existing jobs, ready ratings, reused reviews and waiting ratings. Job counts are deduplicated across searches; they are not a claim of complete market coverage. Expand workflow history to inspect individual search messages. Earlier run history stays available in a collapsed section, with a single **Recover unfinished work** action.
+
+Temporary connection/worker failures resume automatically from saved progress, stopping after three consecutive attempts without a saved batch advancing. Successful search batches renew the recovery budget. Public job-board pagination checkpoints advance only after a batch is saved; an interrupted batch can safely repeat without duplicate records or inflated totals. Employer feeds can refetch their published snapshot and reuse saved results. A completed collection is not scraped again when retrying its ratings.
+
+Explicit platform denials trigger a two-minute cooldown, then an eight-minute cooldown, while other platforms continue. After the third denial that platform's remaining searches need attention. A rating timeout retries its batch once, then uses the bounded workflow recovery; login/model/subscription access problems defer model requests while collection continues. **Resume unfinished** retries unsuccessful steps without rerunning successful ones or consuming tokens for unchanged reviews. Missing descriptions are reported separately.
+
+Closing the dashboard server preserves its queue. The next launch resumes unfinished work; closing only the browser never stops the background monitor. **Stop workflow** is an explicit stop and requires **Resume unfinished** to continue. On macOS/Linux, a workspace lock prevents overlapping dashboard servers. Real source access restrictions and subscription allowance still cannot be removed by retry handling.
+
+## Open and closed positions
+
+The job library now tracks **Open**, **Closed** and **Unverified** separately from application stages and fit ratings. **Find & rate jobs** automatically queues a posting-availability step after collection; **Check posting status** checks the saved library separately without model calls. The active full workflow receives this step when upgrading. Checks save per-job progress so interrupted checks can resume.
+
+The library defaults to **Open + unverified**, hiding confirmed closures while retaining all records in **Closed** or **All posting statuses**. Details show the latest check, last confirmed status, closure reason and last-seen collection time. Edit details can manually mark a position open/closed/unverified. Closure never deletes applications or changes stages, notes or cached ratings.
+
+Greenhouse and Lever check exact posting IDs against complete, unfiltered public employer feeds, shared across the run. Partial/error/repeated feeds cannot establish closure. Job-board pages require exact posting metadata, LinkedIn's explicit closure panel, or a non-redirected missing/gone response for a native posting. Employer evidence takes priority over aggregator links. Search absence, posting age, expired metadata, login redirects, blocked requests and unsupported employer platforms remain unverified. A failed recheck retains the last confirmed status; previously closed jobs stay out of the default active view until reopening is confirmed.
+
+Public requests use verified TLS, restricted HTTPS destinations/redirects, bounded response sizes and timeouts, and platform-level denial suppression. No sign-in, CAPTCHA bypass, API billing or model rating is involved. Third-party markup and unsupported employer platforms can limit verification; unverified does not mean closed or confirmed open.
+
+## Application agents · prepare, review, submit yourself
+
+Each library row and job detail has **Apply with agent**. Review the named position and start preparation to authorize using your locally attached CV PDF and saved profile for that employer. Upload a PDF under 5 MB in Profile; add your contact details and any explicit answers there. Missing details are never inferred from nationality or salary-market estimates.
+
+A separate, short-lived **gpt-6-luna** Codex CLI worker uses ChatGPT subscription authentication, with no API-key fallback. It operates through the installed native Browser plugin in a connected Chrome browser; the standalone worker cannot use the in-app browser. Keep the dashboard server and Chrome running; this development chat can close. Connect the ChatGPT Browser extension in Chrome before starting. An actual connection preflight on this host returned **No connected Chrome browser is available**; live form filling has therefore not yet been verified here.
+
+Preparation pauses for missing answers, login/CAPTCHA, legal consents or an uncertain application destination. Its review panel shows progress, filled fields, requested answers and a screenshot when available. Retry explicitly after resolving a blocker; retries inspect the existing form and refresh the CV/profile snapshot. Only one preparation worker runs at a time, independently of collection. Repeated starts and matching employer URLs reuse an existing task; previously applied or confirmed-closed positions cannot start again. Interrupted preparation stays paused after restart, with no blind automatic application retry. Stop controls terminate the worker tree, and a 20-minute limit prevents unattended loops.
+
+The agent is instructed to stop before final submission and has no submission or tracking tool. Review the prepared **existing Chrome tab**, handle consents, then submit yourself. An application link opened in another browser might not retain the form. After submitting, **I submitted it myself** records Applied and the date; an agent result alone never changes the application stage. This mode does not offer automatic submission.
+
+CV copies, profile snapshots, preparation results and screenshots are local, ignored runtime files under `data/`. A complete backup needs both the SQLite database and its adjacent runtime files, not just the jobs JSON export.
+
+## Quick library management
+
+Right-click a position or use its **⋯** menu for **Not interested**, **Restore to library**, details and **Apply with agent**. Check several rows, shift-click a range, or select all positions matching the current filters; the sticky selection bar applies Not interested or Restore to the selection. Changing filters clears the selection so unseen positions cannot be changed by accident. Selection survives progress refreshes.
+
+Not interested positions disappear from the default active library and strongest-match recommendations. Use **View not interested**, the interest filter, or **All interests** to retrieve them. **Undo last change** reverses the most recent change during this page session; Restore remains available after restarting. Job details provide the same Not interested/Restore control without discarding unsaved tracking notes. Application stages, dates, notes, posting status and rating cache are retained. Collection refreshes do not restore dismissed roles; matching duplicates follow the saved choice. Jobs JSON backups retain interest state. Marking a role Not interested cancels its queued/running application preparation; restoring it never automatically restarts the agent.
+
+## LinkedIn failures and independent recovery
+
+Workflow totals count searches, ratings and posting checks, not individual job applications. One denied LinkedIn search can put the remaining LinkedIn queries on cooldown; the summary distinguishes attempted searches from queries that were never started. Availability and rating steps are not classified as LinkedIn searches and cannot inherit its platform pause. An unfinished posting check can be retried independently. Recovering searches refreshes the final status-check snapshot so new positions are included, while saved checks are reused.
+
+LinkedIn searches now wait 30 seconds between pages as well as between queries. Optional description requests are spaced by at least two seconds, and the installed JobSpy 1.x adapter stops issuing them after the first explicit denial in a batch. Description-page failures retain the returned listings and existing descriptions, disable further description fetching for that search, and persist this choice across retry/restart. New roles without descriptions remain visibly unrated; missing data is not fabricated. Saved pagination advances only when a page succeeds; a denied search retries its failed offset with saved IDs deduplicated.
+
+Search denials record the upstream status/message. The latest collection error remains in the saved checkpoint through cooldown messages and is visible in expanded search details. Real HTTP 429 limits can still delay public collection; retries remain bounded and do not bypass authentication, CAPTCHA or access restrictions.
+
+Recovery measures consecutive failures from the offset/match count captured when each attempt starts. Advancing a saved batch renews that budget; three attempts at the same offset without new saved progress still stop. New data remains saved even when the next upstream request is denied.

@@ -8,9 +8,6 @@ from docx import Document  # Library for creating Word documents
 # Load environment variables
 load_dotenv()
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
-
 # Define directories
 cv_folder = "./user_data/"
 db_path = "./linkedin_jobs.db"
@@ -23,6 +20,8 @@ def generate_cover_letter(job_id):
     """
     Generate a cover letter for a specific job ID and save it as a .docx file.
     """
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=60, max_retries=1)
+
     # Get the most recent CV
     cv_path = get_most_recent_pdf(cv_folder)
     print(f"Using CV file: {cv_path}")
@@ -53,7 +52,7 @@ def generate_cover_letter(job_id):
         # Generate the cover letter using ChatGPT
         print(f"Generating cover letter for job ID {job_id}...")
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             messages=[
                 {"role": "system", "content": "You are an expert cover letter writer."},
                 {
@@ -86,4 +85,8 @@ def generate_cover_letter(job_id):
         conn.close()
 
 #Enter job_id for which you want to generate your cover letter
-generate_cover_letter()
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate a legacy Word cover letter.")
+    parser.add_argument("job_id")
+    generate_cover_letter(parser.parse_args().job_id)

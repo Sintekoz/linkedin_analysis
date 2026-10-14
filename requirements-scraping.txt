@@ -1,0 +1,2 @@
+# Install separately: the local dashboard itself has no third-party dependencies.
+python-jobspy>=1.1.80,<2
