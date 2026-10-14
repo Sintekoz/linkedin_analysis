@@ -64,6 +64,8 @@ def enqueue(path,jid):
     with store.connect(path) as db:
         job=db.execute("SELECT * FROM jobs WHERE id=? AND duplicate_of=''",(jid,)).fetchone()
         if not job:raise LookupError('Job not found.')
+        if job['interest']=='not_interested':
+            raise ValueError('Restore this position to the library before preparing an application.')
         if job['stage'] in ('applied','interview','offer','rejected','withdrawn'):
             raise ValueError('This position already has application history. Review its existing application instead of applying again.')
         if job['posting_status']=='closed' or job['posting_last_confirmed']=='closed' and job['posting_status']!='open':
@@ -96,6 +98,8 @@ def retry(path,tid,answers):
         if not task:raise LookupError('Application preparation not found.')
         if task['status'] not in RESUMABLE:raise ValueError('This preparation cannot be restarted in its current state.')
         job=db.execute('SELECT * FROM jobs WHERE id=?',(task['job_id'],)).fetchone()
+        if job['interest']=='not_interested':
+            raise ValueError('Restore this position to the library before restarting preparation.')
         if job['stage'] in ('applied','interview','offer','rejected','withdrawn') or job['posting_status']=='closed' or job['posting_last_confirmed']=='closed' and job['posting_status']!='open':
             raise ValueError('This position is already tracked as applied or closed; review it before restarting.')
         combined=json.loads(task['answers']) | answers

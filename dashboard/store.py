@@ -113,6 +113,7 @@ def init(path):
                      'worker_pid': 'INTEGER'},
         }
         migrations['jobs'].update({k:"TEXT DEFAULT ''" for k in POSTING_FIELDS})
+        migrations['jobs'].update({'interest':"TEXT NOT NULL DEFAULT 'interested'",'interest_updated_at':"TEXT NOT NULL DEFAULT ''"})
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
             for name, definition in fields.items():
@@ -210,6 +211,8 @@ def reconcile_duplicates(db):
             # Never hide a separately tracked application or discard its notes.
             separately_tracked = any(data[k] and (k!='stage' or data[k]!='discovered') and data[k]!=owner[k] for k in TRACK_FIELDS)
             if not separately_tracked:
+                if data['interest_updated_at'] > owner['interest_updated_at']:
+                    db.execute('UPDATE jobs SET interest=?,interest_updated_at=? WHERE id=?',(data['interest'],data['interest_updated_at'],owner['id']))
                 for key in JOB_FIELDS:
                     if not owner[key] and data.get(key):
                         db.execute('UPDATE jobs SET '+key+'=? WHERE id=?', (data[key],owner['id']))
@@ -280,6 +283,10 @@ def upsert(db, data, tracking=False):
     values['updated_at'] = now()
     if tracking:
         values.update(validate_tracking(data))
+        if 'interest' in data:
+            if data['interest'] not in ('interested','not_interested'):
+                raise ValueError('Choose interested or not interested.')
+            values.update(interest=data['interest'],interest_updated_at=datetime.now(timezone.utc).isoformat())
     if existing:
         incoming_id = job_id
         job_id = existing['id']
@@ -309,6 +316,31 @@ def upsert(db, data, tracking=False):
     remember_links(db, job_id, data)
     db.execute('INSERT INTO events(job_id,message,created_at) VALUES(?,?,?)', (job_id, 'Job added to workspace', now()))
     return job_id, True
+
+def set_interest(path, job_ids, interest):
+    """Atomic, reversible disposition; collection never overwrites this choice."""
+    if interest not in ('interested','not_interested'):
+        raise ValueError('Choose interested or not interested.')
+    if not isinstance(job_ids,list) or not job_ids or any(not isinstance(j,str) or not j for j in job_ids):
+        raise ValueError('Select at least one valid job.')
+    with connect(path) as db:
+        owners={}
+        for jid in dict.fromkeys(job_ids):
+            row=db.execute('SELECT * FROM jobs WHERE id=?',(jid,)).fetchone()
+            if not row:raise LookupError('A selected position no longer exists. Nothing was changed.')
+            if row['duplicate_of']:
+                row=db.execute('SELECT * FROM jobs WHERE id=?',(row['duplicate_of'],)).fetchone()
+                if not row:raise LookupError('The original position could not be found.')
+            owners[row['id']]=row
+        changed=[];stamp=datetime.now(timezone.utc).isoformat()
+        for jid,row in owners.items():
+            if row['interest']==interest:continue
+            db.execute('UPDATE jobs SET interest=?,interest_updated_at=? WHERE id=? OR duplicate_of=?',(interest,stamp,jid,jid))
+            message='Marked not interested; hidden from the active library.' if interest=='not_interested' else 'Restored to the active library.'
+            db.execute('INSERT INTO events(job_id,message,created_at) VALUES(?,?,?)',(jid,message,stamp))
+            changed.append(jid)
+    return {'ok':True,'changed_ids':changed,'job_ids':list(owners),'interest':interest}
+
 
 def update_tracking(path, job_id, data):
     values = validate_tracking(data)

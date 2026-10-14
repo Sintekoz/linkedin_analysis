@@ -441,6 +441,15 @@ class App:
         if route == '/api/application-cv':
             with self.lock:
                 return applications.save_cv(self.path,data.get('pdf'))
+        if route == '/api/jobs/interest':
+            with self.lock:
+                result=store.set_interest(self.path,data.get('job_ids'),data.get('interest'))
+                if result['interest']=='not_interested':
+                    with store.connect(self.path) as db:
+                        tasks=[r['id'] for r in db.execute("SELECT id,job_id FROM application_tasks WHERE status IN ('queued','running')") if r['job_id'] in result['job_ids']]
+                    for tid in tasks:
+                        self.stop_application(tid,message='Preparation stopped because you marked the position not interested.')
+                return result
         if len(bits)==4 and bits[:2]==['api','applications']:
             tid=int(bits[2])
             if bits[3]=='stop':return self.stop_application(tid)
