@@ -94,6 +94,28 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(final['status'],'queued');self.assertEqual(json.loads(final['config']),{})
         self.assertEqual(json.loads(final['checkpoint'])['checked_ids'],['old'])
 
+    def test_status_pass_requeues_for_jobs_collected_after_an_early_check(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(rid,)).fetchone()[0]
+            store.upsert(db,{'id':'old','title':'Old role'});store.upsert(db,{'id':'new','title':'New role'})
+            db.execute('INSERT INTO run_jobs VALUES(?,?)',(rid,'new'))
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id,checkpoint) VALUES('Checks',?,'completed','availability',?,?,?)",(json.dumps({'availability_ids':['old']}),store.now(),wid,json.dumps({'checked_ids':['old']}))).lastrowid
+        self.end(rid,status='completed')
+        final=next(r for r in self.rows() if r['id']==check)
+        self.assertEqual(final['status'],'running')
+        self.assertIn('new',json.loads(final['config'])['availability_ids'])
+        self.assertEqual(json.loads(final['checkpoint'])['checked_ids'],['old'])
+    def test_status_pass_is_not_repeated_when_all_collected_jobs_were_checked(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(rid,)).fetchone()[0]
+            store.upsert(db,{'id':'old','title':'Old role'});db.execute('INSERT INTO run_jobs VALUES(?,?)',(rid,'old'))
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id,checkpoint) VALUES('Checks','{}','completed','availability',?,?,?)",(store.now(),wid,json.dumps({'checked_ids':['old']}))).lastrowid
+        self.end(rid,status='completed')
+        self.assertEqual(next(r for r in self.rows() if r['id']==check)['status'],'completed')
+        self.assertFalse(self.app.processes)
+
     def test_successful_batches_renew_consecutive_failure_budget(self):
         rid=self.app.start_all({'source_ids':[1]})['ids'][0]
         with store.connect(self.path) as db:

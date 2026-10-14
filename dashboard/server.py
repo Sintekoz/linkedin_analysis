@@ -128,7 +128,17 @@ class App:
                                 self.recover_run(db,dict(row)|{'error_kind':'temporary'})
             self.launch_next()
 
+    def queue_new_posting_checks(self,db,row):
+        if row['kind']!='collection' or row['status'] not in ('completed','completed_with_warnings','failed','timed_out'):
+            return
+        final=db.execute("SELECT * FROM runs WHERE workflow_id=? AND kind='availability' AND status='completed' ORDER BY id DESC LIMIT 1",(row['workflow_id'],)).fetchone()
+        if not final:return
+        checked=set(json.loads(final['checkpoint']).get('checked_ids',[]))
+        if any(r[0] not in checked for r in db.execute('SELECT job_id FROM run_jobs WHERE run_id=?',(row['id'],))):
+            db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,config='{}',finished_at=NULL,message='Checking positions saved since the previous status pass.' WHERE id=?",(final['id'],))
+
     def recover_run(self, db, row):
+        self.queue_new_posting_checks(db,row)
         kind = row['error_kind'] or workflows.error_kind(row['rating_error'] or row['message'],row['provider_blocked'])
         # A rating problem never prevents collecting on a different search.
         if row['rating_error'] and workflows.error_kind(row['rating_error'])=='rating_access':
