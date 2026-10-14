@@ -53,6 +53,7 @@ def summaries(db):
         finished_at = None if active else (workflow['finished_at'] or store.now())
         db.execute('UPDATE workflows SET status=?,finished_at=? WHERE id=?', (status, finished_at, workflow['id']))
         providers = {}
+        provider_issues = {}
         for row in rows:
             provider = json.loads(row['config']).get('provider', row['kind'] if row['kind'] in ('rating','availability') else 'linkedin')
             item = providers.setdefault(provider, {'total':0,'finished':0,'attention':0,'retrying':0})
@@ -60,6 +61,11 @@ def summaries(db):
             item['finished'] += int(row['status'] not in ACTIVE and row['status'] not in RECOVERABLE and row['status']!='cancelled')
             item['attention'] += int(row['status'] in RECOVERABLE)
             item['retrying'] += int(row['status']=='retry_wait')
+            if row['kind']=='collection' and row['error_kind']=='provider_access' and row['status'] in RECOVERABLE:
+                issue=provider_issues.setdefault(provider,{'affected':0,'attempted':0,'not_started':0})
+                issue['affected']+=1
+                issue['attempted']+=int(row['attempts']>0)
+                issue['not_started']+=int(row['attempts']==0)
         checked=[r[0] for r in db.execute("SELECT j.posting_status FROM jobs j WHERE j.id IN (SELECT job_id FROM run_jobs WHERE run_id IN (SELECT id FROM runs WHERE workflow_id=? AND kind='availability'))",(workflow['id'],))]
         result.append(dict(workflow) | {'status':status,'finished_at':finished_at, **counts,
             'availability_only':bool(rows) and all(r['kind']=='availability' for r in rows),
@@ -73,5 +79,5 @@ def summaries(db):
             'percent':round(100*(counts['finished']+counts['attention'])/len(rows)) if rows else 0,
             'current':next((r for r in rows if r['status']=='running'), None),
             'retry_at':min((r['retry_at'] for r in rows if r['status']=='retry_wait'), default=''),
-            'providers':providers})
+            'providers':providers,'provider_issues':provider_issues})
     return result

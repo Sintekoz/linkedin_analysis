@@ -83,10 +83,14 @@ def run(path, run_id):
     except Exception as error:
         collection_error = str(error)[:1000]
         provider_blocked = isinstance(error, ProviderBlocked)
+        with connect(path) as db:
+            checkpoint=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(run_id,)).fetchone()[0])
+            checkpoint.update(last_collection_error=collection_error,last_collection_error_at=now())
+            db.execute("UPDATE runs SET checkpoint=? WHERE id=? AND status='running'",(json.dumps(checkpoint),run_id))
     try:
         counts = rate_jobs(path, ids, run_id, defer_reason=config.get('rating_paused', ''))
         status = 'failed' if collection_error else ('completed_with_warnings' if counts['unrated'] else 'completed')
-        message = ('Collection failed: '+collection_error+'. Saved jobs were still checked for ratings. ' if collection_error else
+        message = ('Collection failed: '+collection_error.rstrip('. ')+'. Saved jobs were still checked for ratings. ' if collection_error else
                    ('No matching results. Job boards may also block a search; a missing result does not establish closure. ' if not ids else ''))
         if ids:
             message += f"{counts['rated']} rated with Luna; {counts['cached']} existing ratings reused; {counts['unrated']} need attention."

@@ -94,16 +94,16 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]['work_model'], 'Remote')
 
-    def test_provider_blocking_is_reported_after_partial_results_are_saved(self):
+    def test_description_denial_does_not_discard_successful_search_results(self):
         def scrape(**kwargs):
             logger=logging.getLogger('JobSpy:LinkedIn');logger.setLevel(logging.WARNING)
             logger.warning('LinkedIn response status code 429 for job 123')
             return SimpleNamespace(to_dict=lambda **kw: [{'title': 'Analyst'}])
         with patch.dict(sys.modules, {'jobspy': SimpleNamespace(scrape_jobs=scrape)}):
-            iterator = collect(self.config(provider='linkedin'))
-            self.assertEqual(next(iterator)['title'], 'Analyst')
-            with self.assertRaisesRegex(RuntimeError, 'rate-limited'):
-                next(iterator)
+            reports=[]
+            jobs=list(collect(self.config(provider='linkedin'),lambda *r:reports.append(r)))
+            self.assertEqual(jobs[0]['title'],'Analyst')
+            self.assertTrue(any('description requests' in r[2] for r in reports))
 
     def test_irish_city_names_in_foreign_postings_are_not_ireland_evidence(self):
         for location in ('Dublin, Ohio, United States', 'Dublin, California, USA', 'Waterford, Ontario, Canada'):

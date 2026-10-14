@@ -99,14 +99,14 @@ class App:
                         if outcome and outcome['workflow_id']:
                             self.recover_run(db,outcome)
                         elif outcome and outcome['rating_error']:
-                            for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
+                            for queued in db.execute("SELECT id,config FROM runs WHERE kind='collection' AND status='queued'").fetchall():
                                 config = json.loads(queued['config'])
                                 config['rating_paused'] = outcome['rating_error']
                                 db.execute('UPDATE runs SET config=?,message=? WHERE id=?',
                                            (json.dumps(config), 'Collection will continue; ratings need attention and will wait for a later retry.', queued['id']))
                         if outcome and not outcome['workflow_id'] and outcome['provider_blocked']:
                             provider = json.loads(outcome['config']).get('provider', 'linkedin')
-                            for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
+                            for queued in db.execute("SELECT id,config FROM runs WHERE kind='collection' AND status='queued'").fetchall():
                                 if json.loads(queued['config']).get('provider', 'linkedin') == provider:
                                     db.execute("UPDATE runs SET status='paused',message=?,finished_at=? WHERE id=?",
                                                (PROVIDERS[provider]+' denied or rate-limited access. Remaining searches on this platform were paused; retry after a break. Other platforms continue.', store.now(), queued['id']))
@@ -143,14 +143,14 @@ class App:
             db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message=?,finished_at=NULL WHERE id=?",(retry_at,'Temporary interruption. Saved progress will retry automatically; other platforms can continue.',row['id']))
             if kind=='provider_access':
                 provider=json.loads(row['config']).get('provider','linkedin')
-                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
+                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND kind='collection' AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
                     if json.loads(queued['config']).get('provider','linkedin')==provider:
                         db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message=? WHERE id=?",(retry_at,PROVIDERS[provider]+' is cooling down. Other platforms continue; this search will retry automatically.',queued['id']))
         elif row['status']=='failed' or row['rating_error']:
             db.execute("UPDATE runs SET status='needs_attention',error_kind=?,message=? WHERE id=?",(kind,'Automatic recovery stopped. '+row['message'],row['id']))
             if kind=='provider_access':
                 provider=json.loads(row['config']).get('provider','linkedin')
-                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
+                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND kind='collection' AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
                     if json.loads(queued['config']).get('provider','linkedin')==provider:
                         db.execute("UPDATE runs SET status='needs_attention',error_kind='provider_access',retry_at='',finished_at=?,message=? WHERE id=?",(store.now(),PROVIDERS[provider]+' still denies access after three attempts. Resume unfinished work later; other platforms continue.',queued['id']))
 
@@ -276,9 +276,11 @@ class App:
                 self.stop(rid, status, message)
             return {'ok': True}
 
-    def resume_workflow(self, workflow_id=None):
+    def resume_workflow(self, workflow_id=None, run_ids=None):
         if workflow_id is not None and (type(workflow_id) is not int or workflow_id<1):
             raise ValueError('Choose a valid workflow.')
+        if run_ids is not None and (not isinstance(run_ids,list) or not run_ids or any(type(r) is not int for r in run_ids)):
+            raise ValueError('Select valid unfinished workflow steps.')
         with self.lock:
             self.reap()
             with store.connect(self.path) as db:
@@ -290,13 +292,25 @@ class App:
                 if latest:
                     wid=latest['id']
                     rows=db.execute("SELECT * FROM runs WHERE workflow_id=? AND (status IN ('failed','paused','interrupted','timed_out','needs_attention','cancelled') OR (status='completed_with_warnings' AND rating_error!=''))",(wid,)).fetchall()
+                    if run_ids is not None:
+                        if not set(run_ids)<= {r['id'] for r in rows}:
+                            raise ValueError('Only unfinished steps in this workflow can be resumed.')
+                        rows=[r for r in rows if r['id'] in run_ids]
                     if not rows:
                         raise ValueError('No unfinished steps remain in this workflow.')
                     for row in rows:
                         config=json.loads(row['config']);config.pop('rating_paused',None)
                         db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,retry_at='',error_kind='',rating_error='',config=?,finished_at=NULL,message='Resuming unfinished work from saved progress.' WHERE id=?",(json.dumps(config),row['id']))
+                    recovered_ids=[r['id'] for r in rows]
+                    if any(r['kind']=='collection' for r in rows):
+                        final=db.execute("SELECT * FROM runs WHERE workflow_id=? AND kind='availability' AND status='completed' ORDER BY id DESC LIMIT 1",(wid,)).fetchone()
+                        if final:
+                            # The saved checkpoint retains earlier checks; generate a
+                            # fresh library snapshot at launch so new jobs are included.
+                            db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,config='{}',finished_at=NULL,message='Checking new positions after recovered searches finish.' WHERE id=?",(final['id'],))
+                            recovered_ids.append(final['id'])
                     db.execute("UPDATE workflows SET status='running',finished_at=NULL WHERE id=?",(wid,))
-                    result={'workflow_id':wid,'ids':[r['id'] for r in rows]}
+                    result={'workflow_id':wid,'ids':recovered_ids}
                 else:
                     # Older versions had no workflow IDs/checkpoints. Recover only
                     # the most recent unsuccessful result for each saved search.
@@ -429,7 +443,7 @@ class App:
         if route == '/api/workflow/start':
             return self.start_workflow()
         if route == '/api/workflow/resume':
-            return self.resume_workflow(data.get('workflow_id'))
+            return self.resume_workflow(data.get('workflow_id'),data.get('run_ids'))
         if route == '/api/availability/run':
             return self.start_availability(data)
         if route == '/api/applications/start':

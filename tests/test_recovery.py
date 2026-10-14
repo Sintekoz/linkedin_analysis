@@ -53,6 +53,64 @@ class RecoveryTests(unittest.TestCase):
         with store.connect(self.path) as db:db.execute('UPDATE runs SET attempts=3 WHERE id=?',(ids[0],))
         self.end(ids[0],status='failed',provider_blocked=1,error_kind='provider_access')
         self.assertEqual([r['status'] for r in self.rows()],['needs_attention','needs_attention','running'])
+    def test_linkedin_denial_never_pauses_availability_or_rating_steps(self):
+        ids=self.app.start_all({})['ids']
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(ids[0],)).fetchone()[0]
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id) VALUES('Checks','{}','queued','availability',?,?)",(store.now(),wid)).lastrowid
+            rating_step=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id) VALUES('Ratings','{}','queued','rating',?,?)",(store.now(),wid)).lastrowid
+        self.end(ids[0],status='failed',provider_blocked=1,error_kind='provider_access',attempts=3)
+        rows={r['id']:r for r in self.rows()}
+        self.assertEqual(rows[check]['status'],'queued');self.assertEqual(rows[rating_step]['status'],'queued')
+        self.assertEqual(rows[ids[1]]['status'],'needs_attention')
+        issue=self.app.snapshot()['workflows'][0]['provider_issues']['linkedin']
+        self.assertEqual(issue,{'affected':2,'attempted':1,'not_started':1})
+    def test_provider_cooldown_only_affects_collection_steps(self):
+        ids=self.app.start_all({})['ids']
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(ids[0],)).fetchone()[0]
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id) VALUES('Checks','{}','queued','availability',?,?)",(store.now(),wid)).lastrowid
+        self.end(ids[0],status='failed',provider_blocked=1,error_kind='provider_access')
+        self.assertEqual(next(r for r in self.rows() if r['id']==check)['status'],'queued')
+    def test_resume_one_check_does_not_retry_denied_searches(self):
+        ids=self.app.start_all({})['ids']
+        self.app.processes.clear()
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(ids[0],)).fetchone()[0]
+            db.execute("UPDATE runs SET status='needs_attention',error_kind='provider_access'")
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id) VALUES('Checks','{}','needs_attention','availability',?,?)",(store.now(),wid)).lastrowid
+        result=self.app.mutate('/api/workflow/resume',{'workflow_id':wid,'run_ids':[check]})
+        self.assertEqual(result['ids'],[check]);self.assertEqual(list(self.app.processes),[check])
+        self.assertTrue(all(r['status']=='needs_attention' for r in self.rows() if r['id'] in ids))
+    def test_recovered_searches_check_new_jobs_without_repeating_saved_status_checks(self):
+        ids=self.app.start_all({'source_ids':[1]})['ids'];self.app.processes.clear()
+        with store.connect(self.path) as db:
+            wid=db.execute('SELECT workflow_id FROM runs WHERE id=?',(ids[0],)).fetchone()[0]
+            db.execute("UPDATE runs SET status='needs_attention' WHERE id=?",(ids[0],))
+            check=db.execute("INSERT INTO runs(name,config,status,kind,started_at,workflow_id,checkpoint) VALUES('Checks',?,'completed','availability',?,?,?)",(json.dumps({'availability_ids':['old']}),store.now(),wid,json.dumps({'checked_ids':['old']}))).lastrowid
+        result=self.app.resume_workflow(wid)
+        self.assertEqual(result['ids'],[ids[0],check])
+        final=next(r for r in self.rows() if r['id']==check)
+        self.assertEqual(final['status'],'queued');self.assertEqual(json.loads(final['config']),{})
+        self.assertEqual(json.loads(final['checkpoint'])['checked_ids'],['old'])
+
+    def test_latest_collection_error_survives_cooldown_messages(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        from dashboard.collectors import ProviderBlocked
+        with patch('dashboard.worker.collect',side_effect=ProviderBlocked('LinkedIn search response status code 429')),patch('dashboard.worker.collection_wait',return_value=0):
+            run(self.path,rid)
+        self.app.processes[rid].code=0;self.app.reap()
+        row=self.rows()[0]
+        self.assertEqual(row['status'],'retry_wait')
+        self.assertIn('429',json.loads(row['checkpoint'])['last_collection_error'])
+
+    def test_selected_resume_rejects_finished_or_unknown_steps(self):
+        result=self.app.start_all({'source_ids':[3]});rid=result['ids'][0]
+        self.end(rid,status='completed')
+        for selected in ([rid],[999999],[],['bad']):
+            with self.assertRaises(ValueError):self.app.resume_workflow(result['workflow_id'],selected)
+        self.assertEqual(self.rows()[0]['status'],'completed')
+
     def test_restart_resumes_durable_queue_and_checkpoint(self):
         ids=self.app.start_all({})['ids']
         with store.connect(self.path) as db:db.execute('UPDATE runs SET checkpoint=? WHERE id=?',(json.dumps({'offset':100}),ids[0]))
@@ -176,6 +234,44 @@ class RecoveryTests(unittest.TestCase):
 
 
 class CheckpointTests(unittest.TestCase):
+    def test_search_denial_keeps_raw_status_and_saved_page_checkpoint(self):
+        saved=[]
+        def scrape(**kw):
+            logger=logging.getLogger('JobSpy:LinkedIn');logger.setLevel(logging.ERROR)
+            logger.error('LinkedIn response status code 429')
+            return SimpleNamespace(to_dict=lambda **_: [{'title':'Data','job_url':'https://example.org/jobs/123456'}])
+        with patch.dict('sys.modules',{'jobspy':SimpleNamespace(scrape_jobs=scrape)}):
+            iterator=collect({'provider':'linkedin','keywords':'Data','location':'Ireland'},save_checkpoint=saved.append)
+            self.assertEqual(next(iterator)['title'],'Data')
+            with self.assertRaisesRegex(RuntimeError,'search denied.*429'):next(iterator)
+        self.assertEqual(saved[-1]['offset'],0);self.assertEqual(saved[-1]['found'],1)
+        self.assertEqual(len(saved[-1]['seen']),1)
+    def test_description_denial_switches_later_pages_to_metadata_without_stopping_search(self):
+        calls=[]
+        def scrape(**kw):
+            calls.append(kw)
+            if kw['offset']==0:
+                logger=logging.getLogger('JobSpy:LinkedIn');logger.setLevel(logging.WARNING)
+                logger.warning('LinkedIn response status code 429 for job 123')
+            count=10 if kw['offset']==0 else 1
+            return SimpleNamespace(to_dict=lambda **_: [{'title':'Data','job_url':f'https://example.org/jobs/{kw["offset"]+i}'} for i in range(count)])
+        with patch.dict('sys.modules',{'jobspy':SimpleNamespace(scrape_jobs=scrape)}),patch('dashboard.collectors.time.sleep'):
+            jobs=list(collect({'provider':'linkedin','keywords':'Data','location':'Ireland'}))
+        self.assertEqual(len(jobs),11)
+        self.assertTrue(calls[0]['linkedin_fetch_description']);self.assertFalse(calls[1]['linkedin_fetch_description'])
+
+    def test_resumed_description_denial_does_not_repeat_detail_requests(self):
+        calls=[]
+        def scrape(**kw):
+            calls.append(kw)
+            return SimpleNamespace(to_dict=lambda **_: [])
+        checkpoint={'offset':10,'found':10,'pages':1,'scanned':10,'seen':[],
+                    'description_failures':2,'description_deferred':True}
+        with patch.dict('sys.modules',{'jobspy':SimpleNamespace(scrape_jobs=scrape)}):
+            list(collect({'provider':'linkedin','keywords':'Data','location':'Ireland'},checkpoint=checkpoint))
+        self.assertFalse(calls[0]['linkedin_fetch_description'])
+        self.assertEqual(calls[0]['offset'],10)
+
     def test_mid_page_timeout_resumes_last_fully_saved_batch(self):
         calls=[];saved=[]
         def scrape(**kwargs):
@@ -190,3 +286,31 @@ class CheckpointTests(unittest.TestCase):
             resumed=list(collect(config,checkpoint=saved[-1]))
         self.assertEqual(calls,[0,100,100]);self.assertEqual(len(resumed),2)
         self.assertEqual(saved[-1]['found'],100)
+
+class DetailGuardTests(unittest.TestCase):
+    def test_first_denial_stops_other_detail_requests_and_restores_adapter(self):
+        from dashboard.collectors import description_guard,ProviderMessages
+        calls=[];messages=ProviderMessages()
+        class Adapter:
+            def _fetch_details(self,jid):
+                calls.append(jid)
+                messages.messages.append((logging.WARNING,'LinkedIn response status code 429 for job '+jid))
+                return {}
+        original=Adapter._fetch_details
+        with patch.dict('sys.modules',{'jobspy.linkedin':SimpleNamespace(LinkedIn=Adapter)}):
+            with description_guard(messages,True):
+                a=Adapter();a._fetch_details('1');a._fetch_details('2');a._fetch_details('3')
+        self.assertEqual(calls,['1']);self.assertIs(Adapter._fetch_details,original)
+    def test_successful_detail_requests_are_paced_and_exception_restores_adapter(self):
+        from dashboard.collectors import description_guard,ProviderMessages
+        class Adapter:
+            def _fetch_details(self,jid):
+                if jid=='2':raise ValueError('Parser error')
+                return {'description':'SQL'}
+        original=Adapter._fetch_details
+        with patch.dict('sys.modules',{'jobspy.linkedin':SimpleNamespace(LinkedIn=Adapter)}),patch('dashboard.collectors.time.monotonic',return_value=0),patch('dashboard.collectors.time.sleep') as sleep:
+            with self.assertRaises(ValueError):
+                with description_guard(ProviderMessages(),True):
+                    a=Adapter();a._fetch_details('1');a._fetch_details('2')
+            sleep.assert_called_once_with(2)
+        self.assertIs(Adapter._fetch_details,original)

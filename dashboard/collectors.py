@@ -6,6 +6,7 @@ import re
 import logging
 import time
 from collections import deque
+from contextlib import contextmanager
 from datetime import date, datetime
 from .ats import collect_ats
 from urllib.parse import urlsplit, parse_qs
@@ -26,6 +27,38 @@ class ProviderMessages(logging.Handler):
     def emit(self, record):
         if record.levelno >= logging.WARNING:
             self.messages.append((record.levelno, record.getMessage()[:1000]))
+
+
+
+@contextmanager
+def description_guard(messages, enabled):
+    """Pace optional detail requests and stop them on the first explicit denial.
+
+    JobSpy 1.x performs these inside scrape_jobs. The worker is isolated and uses
+    only one board, so the temporary adapter wrapper is confined to this call.
+    """
+    if not enabled:
+        yield;return
+    try:
+        from jobspy.linkedin import LinkedIn
+        original=LinkedIn._fetch_details
+    except (ImportError,AttributeError):
+        yield;return
+    denied=False;last_request=None
+    def fetch_details(adapter,job_id):
+        nonlocal denied,last_request
+        if denied:return {}
+        if last_request is not None:
+            pause=2-(time.monotonic()-last_request)
+            if pause>0:time.sleep(pause)
+        last_request=time.monotonic();before=len(messages.messages)
+        value=original(adapter,job_id)
+        recent=list(messages.messages)[before:]
+        denied=any(re.search(r'\b(?:401|403|429|999)\b',m) for _,m in recent)
+        return value
+    LinkedIn._fetch_details=fetch_details
+    try:yield
+    finally:LinkedIn._fetch_details=original
 
 
 def validate_config(data):
@@ -136,16 +169,21 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
     page_size = 10 if config['provider'] == 'linkedin' else 100
     checkpoint = checkpoint or {}
     seen = set(checkpoint.get('seen', []))
+    description_failures=checkpoint.get('description_failures',0)
+    description_deferred=bool(checkpoint.get('description_deferred',False))
+    if description_deferred:args[key]=False
     offset, found, scanned, pages = (checkpoint.get(k, 0) for k in ('offset','found','scanned','pages'))
     def report(note):
         if progress:
-            progress(pages, scanned, note)
+            suffix=f' {description_failures} description pages unavailable; existing descriptions are retained and listings continue.' if description_failures else ''
+            progress(pages, scanned, note+suffix)
     while True:
         report(f"Requesting {PROVIDERS[config['provider']]} results from position {offset + 1}…")
         messages = ProviderMessages()
         logger.addHandler(messages)
         try:
-            frame = scrape_jobs(**args, results_wanted=page_size, offset=offset)
+            with description_guard(messages,config['provider']=='linkedin' and args[key]):
+                frame = scrape_jobs(**args, results_wanted=page_size, offset=offset)
         finally:
             logger.removeHandler(messages)
         rows = frame.to_dict(orient='records')
@@ -171,12 +209,29 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
             if config['limit'] is None or found < config['limit']:
                 yield job
                 found += 1
-        errors = [m for level, m in messages.messages if level >= logging.ERROR]
-        if any(re.search(r'\b(?:403|429)\b', m) and 'status' in m.lower() or 'blocked' in m.lower()
-               for _, m in messages.messages):
-            raise ProviderBlocked(PROVIDERS[config['provider']]+' denied or rate-limited one or more requests. Any collected jobs are retained; retry after a break.')
+        # A description endpoint failure does not invalidate returned search cards.
+        details=[m for _,m in messages.messages if config['provider']=='linkedin' and
+                 re.search(r'(?:for job \d+|LinkedIn: job \d+:)',m,re.I)]
+        search_messages=[(level,m) for level,m in messages.messages if m not in details]
+        errors=[m for level,m in search_messages if level>=logging.ERROR]
+        blocked=[m for _,m in search_messages if
+                 (re.search(r'\b(?:401|403|429|999)\b',m) and 'status' in m.lower()) or 'blocked' in m.lower()]
+        if details:
+            description_failures+=len(details)
+            report(f'{len(details)} description requests could not finish. Search results were saved; missing descriptions remain visible for later enrichment.')
+            if any(re.search(r'\b(?:401|403|429|999)\b',m) for m in details):
+                args[key]=False  # Respect the denial; do not keep hitting detail pages.
+                description_deferred=True
+        # All yielded rows are now saved. Failed searches retry this same offset;
+        # successful pages advance even when description fetching was denied.
+        if save_checkpoint:
+            save_checkpoint({'offset':offset if errors or blocked else offset+page_size,
+                             'found':found,'scanned':scanned,'pages':pages,'seen':list(seen),
+                             'description_failures':description_failures,'description_deferred':description_deferred})
+        if blocked:
+            raise ProviderBlocked(PROVIDERS[config['provider']]+' search denied or rate-limited: '+blocked[0]+'. Saved jobs are retained; other platforms and posting checks can continue.')
         if errors:
-            raise RuntimeError(PROVIDERS[config['provider']]+' could not finish collection: '+errors[0])
+            raise RuntimeError(PROVIDERS[config['provider']]+' could not finish search collection: '+errors[0])
         if config['limit'] is not None and found >= config['limit']:
             report('Reached your optional result limit.')
             return
@@ -190,7 +245,5 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
             report('The source returned a final partial batch. No further results were exposed; coverage is not guaranteed.')
             return
         offset += page_size
-        if save_checkpoint:
-            save_checkpoint({'offset':offset,'found':found,'scanned':scanned,'pages':pages,'seen':list(seen)})
         report('Saved this batch; waiting briefly before requesting more results…')
-        time.sleep(5)
+        time.sleep(30 if config['provider']=='linkedin' else 5)
