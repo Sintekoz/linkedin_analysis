@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, parse_qs, urlencode
-from .locations import classify_location
+from .locations import classify_location, normalize_location
 from .duplicates import posting_link, similar_groups
 
 STAGES = ('discovered', 'saved', 'applied', 'interview', 'offer', 'rejected', 'withdrawn')
@@ -151,6 +151,9 @@ def library(db):
         links.setdefault(row['job_id'], []).append({'url': row['url'], 'source': row['source']})
     similar = similar_groups(jobs)
     for job in jobs:
+        normalized = normalize_location(job)
+        job.update(normalized)
+        job.update(classify_location(job, normalized))
         job['listings'] = links.get(job['id'], [])
         job['similar_jobs'] = similar.get(job['id'], [])
     return jobs

@@ -103,3 +103,10 @@ Tests exercise canonical deduplication, tracking preservation, atomic import val
 The workflow identifies repeated native posting IDs, normalizes known board URLs and strips marketing parameters. An individual employer posting URL can link the same vacancy across platforms. It keeps one visible entry, retains the discovered source links, preserves application tracking and reuses a current rating. Existing confirmed duplicates are grouped without deleting their original database rows. JSON backups include source-link provenance; CSV exports retain the underlying application records.
 
 A shared company/title/location or identical description alone is not enough to merge jobs: employers reuse titles and templates for different requisitions. Similar listings stay separate and are noted in the library/details. Generic careers and search URLs cannot establish cross-platform identity. Separately tracked applications with different stages or notes are retained independently.
+
+
+## Dublin and remote filters
+
+The job library defaults to **Dublin + remote**. Dublin postal districts, repeated county labels and known provider codes normalize to Dublin, Ireland; County Dublin locations such as Swords and Sandyford are included. Use **Dublin only** or **Remote · Ireland / to confirm** for narrower views.
+
+Remote results include advertised Ireland locations, broad Europe/EMEA/global regions and unspecified remote locations requiring confirmation. Explicit foreign-country restrictions take precedence over vague regional labels. Hybrid roles elsewhere in Ireland are not treated as remote. Original location text remains in job details and saved source data. Normalization is derived for display/filtering and does not overwrite job evidence, application tracking or cached fit ratings.
