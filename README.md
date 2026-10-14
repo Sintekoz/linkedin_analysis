@@ -110,3 +110,13 @@ A shared company/title/location or identical description alone is not enough to 
 The job library defaults to **Dublin + remote**. Dublin postal districts, repeated county labels and known provider codes normalize to Dublin, Ireland; County Dublin locations such as Swords and Sandyford are included. Use **Dublin only** or **Remote · Ireland / to confirm** for narrower views.
 
 Remote results include advertised Ireland locations, broad Europe/EMEA/global regions and unspecified remote locations requiring confirmation. Explicit foreign-country restrictions take precedence over vague regional labels. Hybrid roles elsewhere in Ireland are not treated as remote. Original location text remains in job details and saved source data. Normalization is derived for display/filtering and does not overwrite job evidence, application tracking or cached fit ratings.
+
+## Overall tracking and recovery
+
+**Find & rate jobs** now creates one durable workflow. Its overview shows processed search/rating steps, unique jobs, newly added jobs, refreshed existing jobs, ready ratings, reused reviews and waiting ratings. Job counts are deduplicated across searches; they are not a claim of complete market coverage. Expand workflow history to inspect individual search messages. Earlier run history stays available in a collapsed section, with a single **Recover unfinished work** action.
+
+Temporary connection/worker failures resume automatically from saved progress, up to three worker attempts. Public job-board pagination checkpoints advance only after a batch is saved; an interrupted batch can safely repeat without duplicate records or inflated totals. Employer feeds can refetch their published snapshot and reuse saved results. A completed collection is not scraped again when retrying its ratings.
+
+Explicit platform denials trigger a two-minute cooldown, then an eight-minute cooldown, while other platforms continue. After the third denial that platform's remaining searches need attention. A rating timeout retries its batch once, then uses the bounded workflow recovery; login/model/subscription access problems defer model requests while collection continues. **Resume unfinished** retries unsuccessful steps without rerunning successful ones or consuming tokens for unchanged reviews. Missing descriptions are reported separately.
+
+Closing the dashboard server preserves its queue. The next launch resumes unfinished work; closing only the browser never stops the background monitor. **Stop workflow** is an explicit stop and requires **Resume unfinished** to continue. On macOS/Linux, a workspace lock prevents overlapping dashboard servers. Real source access restrictions and subscription allowance still cannot be removed by retry handling.

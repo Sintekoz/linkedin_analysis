@@ -105,17 +105,17 @@ class BroadWorkflowTests(unittest.TestCase):
         with store.connect(self.path) as db:
             self.assertTrue(all(json.loads(r['config'])['limit']==5000 for r in db.execute("SELECT config FROM runs WHERE status IN ('running','queued')")))
 
-    def test_denied_platform_pauses_its_remaining_queries_but_other_platforms_continue(self):
+    def test_denied_platform_cools_down_while_other_platforms_continue(self):
         self.app.mutate('/api/sources/3', {'name':'Indeed', 'config':{'provider':'indeed','keywords':'Data','location':'Ireland'}})
         with patch('dashboard.server.subprocess.Popen',side_effect=lambda *a,**kw:FakeProcess()):
             ids=self.app.start_all({})['ids']
             self.finish(ids[0])
             with store.connect(self.path) as db:
-                db.execute('UPDATE runs SET provider_blocked=1 WHERE id=?',(ids[0],))
+                db.execute("UPDATE runs SET status='failed',provider_blocked=1,error_kind='provider_access' WHERE id=?",(ids[0],))
             self.app.reap()
         with store.connect(self.path) as db:
             statuses=[r[0] for r in db.execute('SELECT status FROM runs ORDER BY id')]
-        self.assertEqual(statuses,['completed','paused','running'])
+        self.assertEqual(statuses,['retry_wait','retry_wait','running'])
         self.assertEqual(list(self.app.processes),[ids[2]])
 
     def test_progressing_work_has_no_elapsed_deadline_but_stalled_work_stops(self):

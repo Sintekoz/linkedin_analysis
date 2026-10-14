@@ -1,0 +1,73 @@
+"""Durable workflow summaries and bounded, provider-specific recovery."""
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from . import store
+
+ACTIVE = ('running', 'queued', 'retry_wait')
+RECOVERABLE = ('failed', 'paused', 'interrupted', 'timed_out', 'needs_attention')
+MAX_ATTEMPTS = 3
+
+
+def error_kind(message, blocked=False):
+    text = message.lower()
+    if any(s in text for s in ('subscription limit', 'allowance resets', 'chatgpt login',
+                                'sign in', 'authentication', 'luna is unavailable', 'install codex', 'add your cv', 'usage limit', 'quota')):
+        return 'rating_access'
+    if blocked or re.search(r'\b(?:403|429)\b',text) or any(s in text for s in ('rate-limited','denied access')):
+        return 'provider_access'
+    if any(s in text for s in ('timed out', 'timeout', 'connection', 'unexpectedly', 'without progress',
+                                'temporarily', '502', '503', '504', 'rating failed')):
+        return 'temporary'
+    return 'configuration'
+
+
+def later(seconds):
+    return (datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat(timespec='seconds')
+
+
+def remember(db, workflow_id, jid, created=False):
+    if not workflow_id:
+        return
+    row = db.execute('SELECT rating_hash,rating_status FROM jobs WHERE id=?', (jid,)).fetchone()
+    db.execute('INSERT OR IGNORE INTO workflow_jobs(workflow_id,job_id,created,initial_hash) VALUES(?,?,?,?)',
+               (workflow_id, jid, int(created), row['rating_hash'] if row['rating_status']=='complete' else ''))
+
+
+def summaries(db):
+    result = []
+    for workflow in db.execute("SELECT * FROM workflows ORDER BY CASE WHEN EXISTS(SELECT 1 FROM runs WHERE workflow_id=workflows.id AND status IN ('running','queued','retry_wait')) THEN 0 ELSE 1 END,id DESC LIMIT 20").fetchall():
+        rows = [dict(r) for r in db.execute('SELECT * FROM runs WHERE workflow_id=? ORDER BY id', (workflow['id'],))]
+        counts = {'total': len(rows), 'finished': 0, 'running': 0, 'queued': 0, 'retrying': 0, 'attention': 0, 'stopped':0}
+        for row in rows:
+            status = row['status']
+            key = 'running' if status=='running' else 'queued' if status=='queued' else 'retrying' if status=='retry_wait' else 'attention' if status in RECOVERABLE else 'stopped' if status=='cancelled' else 'finished'
+            counts[key] += 1
+        jobs = db.execute('''SELECT j.id,j.rating_status,j.rating_hash,w.created,w.initial_hash
+            FROM workflow_jobs w JOIN jobs j ON j.id=w.job_id WHERE w.workflow_id=? AND j.duplicate_of='' ''', (workflow['id'],)).fetchall()
+        complete = [j for j in jobs if j['rating_status']=='complete']
+        active = counts['running']+counts['queued']+counts['retrying']
+        status = 'stopped' if workflow['status'] in ('cancelled','stopped') else 'running' if active else 'needs_attention' if counts['attention'] or any(j['rating_status'] not in ('complete','missing_description') for j in jobs) else 'completed'
+        # Missing descriptions are a data limitation, surfaced separately from failures.
+        finished_at = None if active else (workflow['finished_at'] or store.now())
+        db.execute('UPDATE workflows SET status=?,finished_at=? WHERE id=?', (status, finished_at, workflow['id']))
+        providers = {}
+        for row in rows:
+            provider = json.loads(row['config']).get('provider', 'ratings' if row['kind']=='rating' else 'linkedin')
+            item = providers.setdefault(provider, {'total':0,'finished':0,'attention':0,'retrying':0})
+            item['total'] += 1
+            item['finished'] += int(row['status'] not in ACTIVE and row['status'] not in RECOVERABLE and row['status']!='cancelled')
+            item['attention'] += int(row['status'] in RECOVERABLE)
+            item['retrying'] += int(row['status']=='retry_wait')
+        result.append(dict(workflow) | {'status':status,'finished_at':finished_at, **counts,
+            'searches': sum(r['kind']=='collection' for r in rows),
+            'unique_jobs':len(jobs), 'added':sum(j['created'] for j in jobs),
+            'refreshed':sum(not j['created'] for j in jobs), 'ready':len(complete),
+            'reused':sum(bool(j['initial_hash']) and j['initial_hash']==j['rating_hash'] for j in complete),
+            'waiting':sum(j['rating_status'] not in ('complete','missing_description') for j in jobs),
+            'missing_description':sum(j['rating_status']=='missing_description' for j in jobs),
+            'percent':round(100*(counts['finished']+counts['attention'])/len(rows)) if rows else 0,
+            'current':next((r for r in rows if r['status']=='running'), None),
+            'retry_at':min((r['retry_at'] for r in rows if r['status']=='retry_wait'), default=''),
+            'providers':providers})
+    return result

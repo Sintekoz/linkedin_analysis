@@ -5,8 +5,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from . import store
+from .workflows import error_kind
 
 MODEL = 'gpt-6-luna'
 BATCH_SIZE = 5
@@ -217,6 +219,13 @@ def rate_jobs(path, ids, run_id=None, defer_reason=''):
             except ReviewFormatError:
                 if not progress('Retrying one malformed rating response automatically…'):
                     return counts
+                reviews = review_batch(batch, settings)
+            except Exception as error:
+                if error_kind(str(error)) != 'temporary':
+                    raise
+                if not progress('Rating connection interrupted. Retrying this batch once…'):
+                    return counts
+                time.sleep(5)
                 reviews = review_batch(batch, settings)
         except Exception as error:
             # Stop after one failed batch: avoid repeated requests against a limit or outage.

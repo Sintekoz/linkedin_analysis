@@ -8,6 +8,7 @@ from .store import connect, now, upsert
 from .rating import rate_jobs
 from .locations import classify_location
 from .collectors import PROVIDERS
+from . import workflows
 
 
 def collection_wait(path, config, run_id):
@@ -26,9 +27,11 @@ def collection_wait(path, config, run_id):
 
 def run(path, run_id):
     with connect(path) as db:
-        config = json.loads(db.execute('SELECT config FROM runs WHERE id=?', (run_id,)).fetchone()[0])
-    found = added = updated = 0
-    ids = list(config.get('job_ids', []))
+        row = dict(db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
+        config = json.loads(row['config'])
+        saved_ids = [r[0] for r in db.execute('SELECT job_id FROM run_jobs WHERE run_id=?', (run_id,))]
+    found, added, updated = (row[k] for k in ('found','added','updated'))
+    ids = list(dict.fromkeys(list(config.get('job_ids', []))+saved_ids))
     collection_error = ''
     provider_blocked = False
     def progress(pages, scanned, note):
@@ -37,26 +40,37 @@ def run(path, run_id):
                                  (pages, scanned, note, note, now(), run_id)).rowcount
             if not changed:
                 raise RuntimeError('Collection stopped.')
+    def save_checkpoint(value):
+        with connect(path) as db:
+            db.execute("UPDATE runs SET checkpoint=?,heartbeat=? WHERE id=? AND status='running'", (json.dumps(value),now(),run_id))
     try:
-        pause = collection_wait(path, config, run_id)
+        pause = collection_wait(path, config, run_id) if not row['collection_done'] else 0
         if pause:
             with connect(path) as db:
                 db.execute("UPDATE runs SET phase='waiting',message='Spacing LinkedIn searches to reduce rate limiting…' WHERE id=? AND status='running'", (run_id,))
             time.sleep(pause)
             with connect(path) as db:
                 db.execute("UPDATE runs SET phase='collecting',message='Collecting jobs; ratings will follow automatically.' WHERE id=? AND status='running'", (run_id,))
-        for job in ([] if 'job_ids' in config else collect(config, progress=progress)):
+        options = {'progress':progress}
+        if row['workflow_id']:
+            options.update(checkpoint=json.loads(row['checkpoint']), save_checkpoint=save_checkpoint)
+        for job in ([] if 'job_ids' in config or row['collection_done'] else collect(config, **options)):
             with connect(path) as db:
                 state = db.execute('SELECT status FROM runs WHERE id=?', (run_id,)).fetchone()[0]
                 if state != 'running':
                     return
                 jid, created = upsert(db, dict(job) | classify_location(job))
-                ids.append(jid)
-                found += 1
-                added += int(created)
-                updated += int(not created)
+                if jid not in ids:
+                    ids.append(jid)
+                    found += 1
+                    added += int(created)
+                    updated += int(not created)
+                db.execute('INSERT OR IGNORE INTO run_jobs(run_id,job_id) VALUES(?,?)', (run_id,jid))
+                workflows.remember(db,row['workflow_id'],jid,created)
                 db.execute('UPDATE runs SET found=?,added=?,updated=?,message=?,heartbeat=? WHERE id=?',
                            (found, added, updated, 'Saving '+PROVIDERS.get(config.get('provider', 'linkedin'), 'job')+' results…', now(), run_id))
+        with connect(path) as db:
+            db.execute("UPDATE runs SET collection_done=1 WHERE id=? AND status='running'", (run_id,))
     except Exception as error:
         collection_error = str(error)[:1000]
         provider_blocked = isinstance(error, ProviderBlocked)
@@ -77,12 +91,13 @@ def run(path, run_id):
                 if row:
                     rating_error = row['rating_error']
                     break
-            db.execute("UPDATE runs SET status=?,phase='finished',message=?,rating_error=?,provider_blocked=?,finished_at=? WHERE id=? AND status='running'",
-                       (status, message, rating_error, int(provider_blocked), now(), run_id))
+            kind = workflows.error_kind(collection_error,provider_blocked) if collection_error else workflows.error_kind(rating_error) if rating_error else ''
+            db.execute("UPDATE runs SET status=?,phase='finished',message=?,rating_error=?,provider_blocked=?,error_kind=?,finished_at=? WHERE id=? AND status='running'",
+                       (status, message, rating_error, int(provider_blocked), kind, now(), run_id))
     except Exception as error:
         with connect(path) as db:
-            db.execute("UPDATE runs SET status='failed',message=?,finished_at=? WHERE id=? AND status='running'",
-                       ('Saved jobs are retained. Rating worker failed: '+str(error)[:1000], now(), run_id))
+            db.execute("UPDATE runs SET status='failed',error_kind=?,message=?,finished_at=? WHERE id=? AND status='running'",
+                       (workflows.error_kind(str(error)), 'Saved jobs are retained. Rating worker failed: '+str(error)[:1000], now(), run_id))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

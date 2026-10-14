@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from . import store
 from .collectors import validate_config, PROVIDERS
 from . import rating
+from . import workflows
 from .locations import classify_location
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -35,7 +36,20 @@ class App:
         self.rating_checked = 0
         store.init(self.path)
         with store.connect(self.path) as db:
-            db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status IN ('running','queued')", (store.now(),))
+            # A crash can leave an isolated worker behind. Stop only a verified
+            # worker for this database/run before allowing another writer to resume it.
+            for row in db.execute("SELECT id,worker_pid FROM runs WHERE status='running' AND workflow_id IS NOT NULL").fetchall():
+                if row['worker_pid'] and os.name=='posix':
+                    try:
+                        command = subprocess.run(['ps','-p',str(row['worker_pid']),'-o','command='], capture_output=True,text=True,timeout=3).stdout
+                        import shlex
+                        args = shlex.split(command)
+                        if '-m' in args and args[args.index('-m')+1]=='dashboard.worker' and '--db' in args and args[args.index('--db')+1]==self.path and '--run' in args and args[args.index('--run')+1]==str(row['id']):
+                            os.killpg(row['worker_pid'], signal.SIGKILL)
+                    except (OSError,ValueError,IndexError,subprocess.TimeoutExpired):
+                        pass
+            db.execute("UPDATE runs SET status='queued',phase='queued',attempts=MAX(0,attempts-1),worker_pid=NULL,finished_at=NULL,message='Resuming saved progress after restart.' WHERE status IN ('running','interrupted') AND workflow_id IN (SELECT id FROM workflows WHERE status='running')")
+            db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status IN ('running','queued') AND workflow_id IS NULL", (store.now(),))
 
     def snapshot(self):
         self.reap()
@@ -44,9 +58,10 @@ class App:
             self.rating_checked = time.monotonic()
         with store.connect(self.path) as db:
             return dict(jobs=store.library(db),
+                workflows=workflows.summaries(db),
                 duplicates=db.execute("SELECT count(*) FROM jobs WHERE duplicate_of!=''").fetchone()[0],
                 sources=[dict(r) | {'config': json.loads(r['config'])} for r in db.execute('SELECT * FROM sources ORDER BY id DESC')],
-                runs=[dict(r) for r in db.execute("SELECT * FROM runs WHERE status IN ('running','queued') OR id IN (SELECT id FROM runs ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
+                runs=[dict(r) for r in db.execute("SELECT * FROM runs WHERE status IN ('running','queued','retry_wait') OR workflow_id IN (SELECT id FROM workflows WHERE status='running') OR workflow_id IN (SELECT id FROM workflows ORDER BY id DESC LIMIT 20) OR id IN (SELECT id FROM runs ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
                 settings={r['key']: json.loads(r['value']) for r in db.execute('SELECT * FROM settings')},
                 stages=store.STAGES, providers=PROVIDERS, jobspy=bool(importlib.util.find_spec('jobspy')), rating=self.rating_info, token=self.token)
 
@@ -56,15 +71,17 @@ class App:
                 code = process.poll()
                 if code is not None:
                     with store.connect(self.path) as db:
-                        db.execute("UPDATE runs SET status='failed',message='Background process exited unexpectedly.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
-                        outcome = db.execute('SELECT rating_error,provider_blocked,config FROM runs WHERE id=?', (rid,)).fetchone()
-                        if outcome and outcome['rating_error']:
+                        db.execute("UPDATE runs SET status='failed',error_kind='temporary',message='Background process exited unexpectedly. Saved batches are retained.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
+                        outcome = db.execute('SELECT * FROM runs WHERE id=?', (rid,)).fetchone()
+                        if outcome and outcome['workflow_id']:
+                            self.recover_run(db,outcome)
+                        elif outcome and outcome['rating_error']:
                             for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
                                 config = json.loads(queued['config'])
                                 config['rating_paused'] = outcome['rating_error']
                                 db.execute('UPDATE runs SET config=?,message=? WHERE id=?',
                                            (json.dumps(config), 'Collection will continue; ratings need attention and will wait for a later retry.', queued['id']))
-                        if outcome and outcome['provider_blocked']:
+                        if outcome and not outcome['workflow_id'] and outcome['provider_blocked']:
                             provider = json.loads(outcome['config']).get('provider', 'linkedin')
                             for queued in db.execute("SELECT id,config FROM runs WHERE status='queued'").fetchall():
                                 if json.loads(queued['config']).get('provider', 'linkedin') == provider:
@@ -81,22 +98,56 @@ class App:
                     # progress. Terminate only a stalled worker, not an elapsed budget.
                     if time.monotonic() - process.phase_started > 600:
                         self.stop(rid, 'timed_out', 'Stopped after ten minutes without progress. Saved jobs and ratings are retained.')
+                        with store.connect(self.path) as db:
+                            row = db.execute('SELECT * FROM runs WHERE id=?',(rid,)).fetchone()
+                            if row['workflow_id']:
+                                db.execute("UPDATE runs SET error_kind='temporary' WHERE id=?",(rid,))
+                                self.recover_run(db,dict(row)|{'error_kind':'temporary'})
             self.launch_next()
+
+    def recover_run(self, db, row):
+        kind = row['error_kind'] or workflows.error_kind(row['rating_error'] or row['message'],row['provider_blocked'])
+        # A rating problem never prevents collecting on a different search.
+        if row['rating_error'] and workflows.error_kind(row['rating_error'])=='rating_access':
+            for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND status='queued'",(row['workflow_id'],)).fetchall():
+                config=json.loads(queued['config']);config['rating_paused']=row['rating_error']
+                db.execute('UPDATE runs SET config=? WHERE id=?',(json.dumps(config),queued['id']))
+        if row['status'] not in ('failed','timed_out','completed_with_warnings'):
+            return
+        if kind in ('temporary','provider_access') and row['attempts'] < workflows.MAX_ATTEMPTS:
+            delay = (120 if kind=='provider_access' else 30) * (4**max(0,row['attempts']-1))
+            retry_at=workflows.later(delay)
+            db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message=?,finished_at=NULL WHERE id=?",(retry_at,'Temporary interruption. Saved progress will retry automatically; other platforms can continue.',row['id']))
+            if kind=='provider_access':
+                provider=json.loads(row['config']).get('provider','linkedin')
+                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
+                    if json.loads(queued['config']).get('provider','linkedin')==provider:
+                        db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message=? WHERE id=?",(retry_at,PROVIDERS[provider]+' is cooling down. Other platforms continue; this search will retry automatically.',queued['id']))
+        elif row['status']=='failed' or row['rating_error']:
+            db.execute("UPDATE runs SET status='needs_attention',error_kind=?,message=? WHERE id=?",(kind,'Automatic recovery stopped. '+row['message'],row['id']))
+            if kind=='provider_access':
+                provider=json.loads(row['config']).get('provider','linkedin')
+                for queued in db.execute("SELECT id,config FROM runs WHERE workflow_id=? AND status IN ('queued','retry_wait')",(row['workflow_id'],)).fetchall():
+                    if json.loads(queued['config']).get('provider','linkedin')==provider:
+                        db.execute("UPDATE runs SET status='needs_attention',error_kind='provider_access',retry_at='',finished_at=?,message=? WHERE id=?",(store.now(),PROVIDERS[provider]+' still denies access after three attempts. Resume unfinished work later; other platforms continue.',queued['id']))
 
     def launch_next(self):
         if self.processes:
             return
         with store.connect(self.path) as db:
+            db.execute("UPDATE runs SET status='queued',phase='queued' WHERE status='retry_wait' AND retry_at<=?",(store.now(),))
             row = db.execute("SELECT id FROM runs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
             if not row:
                 return
             rid = row['id']
-            db.execute("UPDATE runs SET status='running',phase='collecting',started_at=?,message='Collecting jobs; ratings will follow automatically.' WHERE id=?", (store.now(), rid))
+            db.execute("UPDATE runs SET status='running',phase='collecting',attempts=attempts+1,provider_blocked=0,error_kind='',rating_error='',retry_at='',finished_at=NULL,heartbeat=?,message='Working from saved progress; ratings run automatically.' WHERE id=?", (store.now(), rid))
         try:
             self.launch(rid)
         except Exception:
             with store.connect(self.path) as db:
-                db.execute("UPDATE runs SET status='cancelled',message='Workflow stopped: a background worker could not start.',finished_at=? WHERE status='queued'", (store.now(),))
+                row=db.execute('SELECT * FROM runs WHERE id=?',(rid,)).fetchone()
+                if row['workflow_id']:
+                    self.recover_run(db,row)
 
     def launch(self, rid, phase='collecting'):
         try:
@@ -105,9 +156,11 @@ class App:
             process.started = process.phase_started = time.monotonic()
             process.phase = phase
             self.processes[rid] = process
+            with store.connect(self.path) as db:
+                db.execute('UPDATE runs SET worker_pid=? WHERE id=?',(getattr(process,'pid',None),rid))
         except Exception:
             with store.connect(self.path) as db:
-                db.execute("UPDATE runs SET status='failed',message='Could not launch background worker.',finished_at=? WHERE id=?", (store.now(), rid))
+                db.execute("UPDATE runs SET status='failed',error_kind='temporary',message='Could not launch background worker.',finished_at=? WHERE id=?", (store.now(), rid))
             raise
         return {'id': rid}
 
@@ -117,12 +170,17 @@ class App:
             if self.processes:
                 raise ValueError('A collection or rating is already running. Wait or stop it before starting another.')
             with store.connect(self.path) as db:
+                if db.execute("SELECT 1 FROM runs WHERE status IN ('running','queued','retry_wait')").fetchone():
+                    raise ValueError('A workflow is already active, including automatic retries. Stop it first.')
                 source = db.execute('SELECT * FROM sources WHERE id=?', (source_id,)).fetchone()
                 if not source:
                     raise LookupError('Search not found.')
-                rid = db.execute("INSERT INTO runs(source_id,name,config,status,message,started_at) VALUES(?,?,?,'running',?,?)",
+                rid = db.execute("INSERT INTO runs(source_id,name,config,status,message,started_at) VALUES(?,?,?,'queued',?,?)",
                     (source_id, source['name'], source['config'], 'Fetching jobs. Full descriptions can take a few minutes.', store.now())).lastrowid
-            return self.launch(rid)
+                wid=db.execute('INSERT INTO workflows(started_at) VALUES(?)',(store.now(),)).lastrowid
+                db.execute('UPDATE runs SET workflow_id=? WHERE id=?',(wid,rid))
+            self.launch_next()
+            return {'id':rid,'workflow_id':wid}
 
     def start_all(self, data, include_waiting=False):
         with self.lock:
@@ -137,6 +195,8 @@ class App:
                     any(type(i) is not int for i in requested)):
                 raise ValueError('Choose valid source IDs.')
             with store.connect(self.path) as db:
+                if db.execute("SELECT 1 FROM runs WHERE status IN ('running','queued','retry_wait')").fetchone():
+                    raise ValueError('A workflow is already active, including automatic retries. Stop it before starting another.')
                 sources = db.execute('SELECT * FROM sources ORDER BY id').fetchall()
                 if requested is not None:
                     if not set(requested) <= {s['id'] for s in sources}:
@@ -146,6 +206,7 @@ class App:
                 if not sources and not waiting:
                     raise ValueError('Add at least one search.')
                 ids = []
+                wid=db.execute('INSERT INTO workflows(started_at) VALUES(?)',(store.now(),)).lastrowid
                 if waiting:
                     ids.append(db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'queued','rating','queued',?,?)",
                         ('Existing job ratings', json.dumps({'job_ids': waiting}), 'Existing jobs will be checked automatically before collecting more.', store.now())).lastrowid)
@@ -155,8 +216,12 @@ class App:
                         config['limit'] = override
                     ids.append(db.execute("INSERT INTO runs(source_id,name,config,status,phase,message,started_at) VALUES(?,?,?,'queued','queued',?,?)",
                         (source['id'], source['name'], json.dumps(config), 'Waiting for the previous search and ratings to finish.', store.now())).lastrowid)
+                for rid in ids:
+                    db.execute('UPDATE runs SET workflow_id=? WHERE id=?',(wid,rid))
+                for jid in waiting:
+                    workflows.remember(db,wid,jid)
             self.launch_next()
-            return {'ids': ids, 'queued': len(ids)}
+            return {'ids': ids, 'queued': len(ids), 'workflow_id':wid}
 
     def start_workflow(self):
         with self.lock:
@@ -165,6 +230,9 @@ class App:
                 # Repeated clicks must not enqueue another scrape or rating.
                 return {'active': True, 'ids': list(self.processes)}
             with store.connect(self.path) as db:
+                active=db.execute("SELECT workflow_id FROM runs WHERE status IN ('running','queued','retry_wait') LIMIT 1").fetchone()
+                if active:
+                    return {'active':True,'workflow_id':active[0]}
                 duplicates = store.reconcile_duplicates(db)
             result = self.start_all({}, include_waiting=True)
             return result | {'duplicates': duplicates}
@@ -172,10 +240,49 @@ class App:
     def stop_all(self, status='cancelled', message='Workflow stopped. Saved jobs and ratings are retained.'):
         with self.lock:
             with store.connect(self.path) as db:
-                db.execute('UPDATE runs SET status=?,message=?,finished_at=? WHERE status=?', (status, message, store.now(), 'queued'))
+                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE status IN ('queued','retry_wait')", (status, message, store.now()))
+                if status=='cancelled':
+                    db.execute("UPDATE workflows SET status='cancelled',finished_at=? WHERE status='running'",(store.now(),))
             for rid in list(self.processes):
                 self.stop(rid, status, message)
             return {'ok': True}
+
+    def resume_workflow(self, workflow_id=None):
+        if workflow_id is not None and (type(workflow_id) is not int or workflow_id<1):
+            raise ValueError('Choose a valid workflow.')
+        with self.lock:
+            self.reap()
+            with store.connect(self.path) as db:
+                if db.execute("SELECT 1 FROM runs WHERE status IN ('running','queued','retry_wait')").fetchone():
+                    return {'active':True}
+                latest=db.execute('SELECT id FROM workflows WHERE id=?',(workflow_id,)).fetchone() if workflow_id else db.execute('SELECT id FROM workflows ORDER BY id DESC LIMIT 1').fetchone()
+                if workflow_id and not latest:
+                    raise LookupError('Workflow not found.')
+                if latest:
+                    wid=latest['id']
+                    rows=db.execute("SELECT * FROM runs WHERE workflow_id=? AND (status IN ('failed','paused','interrupted','timed_out','needs_attention','cancelled') OR (status='completed_with_warnings' AND rating_error!=''))",(wid,)).fetchall()
+                    if not rows:
+                        raise ValueError('No unfinished steps remain in this workflow.')
+                    for row in rows:
+                        config=json.loads(row['config']);config.pop('rating_paused',None)
+                        db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,retry_at='',error_kind='',rating_error='',config=?,finished_at=NULL,message='Resuming unfinished work from saved progress.' WHERE id=?",(json.dumps(config),row['id']))
+                    db.execute("UPDATE workflows SET status='running',finished_at=NULL WHERE id=?",(wid,))
+                    result={'workflow_id':wid,'ids':[r['id'] for r in rows]}
+                else:
+                    # Older versions had no workflow IDs/checkpoints. Recover only
+                    # the most recent unsuccessful result for each saved search.
+                    sources=[r['source_id'] for r in db.execute("SELECT r.source_id FROM runs r JOIN sources s ON s.id=r.source_id WHERE r.id=(SELECT MAX(id) FROM runs WHERE source_id=r.source_id) AND r.status IN ('failed','paused','interrupted','timed_out')")]
+                    result=None
+            if result:
+                self.launch_next()
+                return result
+            return self.start_all({'source_ids':sources} if sources else {},include_waiting=True)
+
+    def suspend(self):
+        """Closing the server preserves the queue for the next launch."""
+        with self.lock:
+            for rid in list(self.processes):
+                self.stop(rid,'interrupted','Dashboard closed. Saved progress will resume when it opens again.')
 
     def start_ratings(self):
         with self.lock:
@@ -183,12 +290,19 @@ class App:
             if self.processes:
                 raise ValueError('A collection or rating is already running. Wait or stop it first.')
             with store.connect(self.path) as db:
+                if db.execute("SELECT 1 FROM runs WHERE status IN ('running','queued','retry_wait')").fetchone():
+                    raise ValueError('A workflow is already active. Stop it before retrying ratings.')
                 ids = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' AND duplicate_of='' ORDER BY created_at DESC")]
                 if not ids:
                     raise ValueError('No jobs are waiting for a rating.')
-                rid = db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'running','rating','rating',?,?)",
+                rid = db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'queued','rating','rating',?,?)",
                                  ('Waiting job ratings', json.dumps({'job_ids': ids}), 'Checking waiting jobs with Luna…', store.now())).lastrowid
-            return self.launch(rid, 'rating')
+                wid=db.execute('INSERT INTO workflows(started_at) VALUES(?)',(store.now(),)).lastrowid
+                db.execute('UPDATE runs SET workflow_id=? WHERE id=?',(wid,rid))
+                for jid in ids:
+                    workflows.remember(db,wid,jid)
+            self.launch_next()
+            return {'id':rid,'workflow_id':wid}
 
     def stop(self, rid, status='cancelled', message='Stopped by you. Already saved jobs are retained.'):
         with self.lock:
@@ -216,7 +330,7 @@ class App:
                     process.wait()
                 self.processes.pop(rid, None)
             with store.connect(self.path) as db:
-                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE id=? AND status IN ('running','queued')", (status, message, store.now(), rid))
+                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE id=? AND status IN ('running','queued','retry_wait')", (status, message, store.now(), rid))
             return {'ok': True}
 
     def mutate(self, route, data):
@@ -225,6 +339,8 @@ class App:
         bits = route.strip('/').split('/')
         if route == '/api/workflow/start':
             return self.start_workflow()
+        if route == '/api/workflow/resume':
+            return self.resume_workflow(data.get('workflow_id'))
         if route == '/api/jobs':
             with store.connect(self.path) as db:
                 jid, created = store.upsert(db, data, tracking=True)
@@ -426,6 +542,16 @@ def main():
     parser.add_argument('--legacy-db', help='Read-only import of an original linkedin_jobs.db')
     parser.add_argument('--no-browser', action='store_true')
     args = parser.parse_args()
+    # Prevent a second dashboard from recovering/interrupting the first one's workers.
+    lock_file=None
+    if os.name=='posix':
+        import fcntl
+        Path(args.db).resolve().parent.mkdir(parents=True,exist_ok=True)
+        lock_file=open(str(Path(args.db).resolve())+'.lock','a')
+        try:
+            fcntl.flock(lock_file,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            parser.exit(1,'This workspace is already running. Open its existing dashboard.\n')
     app = App(args.db)
     if args.legacy_db:
         print('Imported', store.import_legacy(app.path, args.legacy_db), 'legacy jobs.')
@@ -448,8 +574,10 @@ def main():
     finally:
         monitor_stop.set()
         monitor_thread.join(timeout=5)
-        app.stop_all('interrupted', 'Dashboard stopped. Saved jobs and ratings are retained.')
+        app.suspend()
         server.server_close()
+        if lock_file:
+            lock_file.close()
 
 if __name__ == '__main__':
     main()

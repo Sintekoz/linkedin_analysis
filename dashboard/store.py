@@ -70,6 +70,16 @@ def init(path):
         CREATE INDEX IF NOT EXISTS job_links_job ON job_links(job_id);
         CREATE INDEX IF NOT EXISTS jobs_stage ON jobs(stage);
         CREATE INDEX IF NOT EXISTS jobs_follow_up ON jobs(follow_up);
+        CREATE TABLE IF NOT EXISTS workflows (
+          id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, finished_at TEXT,
+          status TEXT NOT NULL DEFAULT 'running');
+        CREATE TABLE IF NOT EXISTS workflow_jobs (
+          workflow_id INTEGER REFERENCES workflows(id), job_id TEXT REFERENCES jobs(id),
+          created INTEGER NOT NULL DEFAULT 0, initial_hash TEXT DEFAULT '',
+          PRIMARY KEY(workflow_id,job_id));
+        CREATE TABLE IF NOT EXISTS run_jobs (
+          run_id INTEGER REFERENCES runs(id), job_id TEXT REFERENCES jobs(id),
+          PRIMARY KEY(run_id,job_id));
         ''')
         # Additive migrations preserve existing workspaces and application records.
         migrations = {
@@ -81,7 +91,11 @@ def init(path):
                      'rated': 'INTEGER DEFAULT 0', 'cached': 'INTEGER DEFAULT 0', 'unrated': 'INTEGER DEFAULT 0',
                      'rating_error': "TEXT DEFAULT ''", 'pages': 'INTEGER DEFAULT 0',
                      'scanned': 'INTEGER DEFAULT 0', 'heartbeat': "TEXT DEFAULT ''",
-                     'collection_note': "TEXT DEFAULT ''", 'provider_blocked': 'INTEGER DEFAULT 0'},
+                     'collection_note': "TEXT DEFAULT ''", 'provider_blocked': 'INTEGER DEFAULT 0',
+                     'workflow_id': 'INTEGER REFERENCES workflows(id)', 'attempts': 'INTEGER DEFAULT 0',
+                     'retry_at': "TEXT DEFAULT ''", 'error_kind': "TEXT DEFAULT ''",
+                     'checkpoint': "TEXT DEFAULT '{}'", 'collection_done': 'INTEGER DEFAULT 0',
+                     'worker_pid': 'INTEGER'},
         }
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}

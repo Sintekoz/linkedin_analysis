@@ -105,7 +105,7 @@ def normalize(row, provider='linkedin'):
         raw_json=json.dumps(r, default=str))
 
 
-def collect(config, progress=None):
+def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
     config = validate_config(config)
     if config['provider'] in ('greenhouse', 'lever'):
         yield from collect_ats(config, progress)
@@ -134,7 +134,9 @@ def collect(config, progress=None):
     # LinkedIn's installed adapter advances by ten native cards per page. Larger
     # requests hide intermediate saves and may skip cards when stopped mid-page.
     page_size = 10 if config['provider'] == 'linkedin' else 100
-    seen, offset, found, scanned, pages = set(), 0, 0, 0, 0
+    checkpoint = checkpoint or {}
+    seen = set(checkpoint.get('seen', []))
+    offset, found, scanned, pages = (checkpoint.get(k, 0) for k in ('offset','found','scanned','pages'))
     def report(note):
         if progress:
             progress(pages, scanned, note)
@@ -188,5 +190,7 @@ def collect(config, progress=None):
             report('The source returned a final partial batch. No further results were exposed; coverage is not guaranteed.')
             return
         offset += page_size
+        if save_checkpoint:
+            save_checkpoint({'offset':offset,'found':found,'scanned':scanned,'pages':pages,'seen':list(seen)})
         report('Saved this batch; waiting briefly before requesting more results…')
         time.sleep(5)
