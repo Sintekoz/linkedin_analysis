@@ -6,6 +6,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import secrets
 import signal
 import sqlite3
@@ -22,6 +23,7 @@ from .collectors import validate_config, PROVIDERS
 from . import rating
 from . import workflows
 from . import availability
+from . import applications
 from .locations import classify_location
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +34,7 @@ class App:
         self.path = str(Path(path).resolve())
         self.token = secrets.token_urlsafe(32)
         self.processes = {}
+        self.application_processes = {}
         self.lock = threading.RLock()
         self.rating_info = None
         self.rating_checked = 0
@@ -53,6 +56,17 @@ class App:
             db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status IN ('running','queued') AND workflow_id IS NULL", (store.now(),))
             for workflow in db.execute("SELECT id FROM workflows w WHERE status='running' AND EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='rating') AND EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='collection') AND NOT EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='availability')").fetchall():
                 db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at,workflow_id) VALUES(?,'{}','queued','availability','queued',?,?,?)",('Posting availability','Checking saved vacancies after collection finishes.',store.now(),workflow['id']))
+            for row in db.execute("SELECT id,worker_pid FROM application_tasks WHERE status='running'").fetchall():
+                if row['worker_pid'] and os.name=='posix':
+                    try:
+                        command=subprocess.run(['ps','-p',str(row['worker_pid']),'-o','command='],capture_output=True,text=True,timeout=3).stdout
+                        import shlex
+                        args=shlex.split(command)
+                        if '-m' in args and args[args.index('-m')+1]=='dashboard.applications' and '--db' in args and args[args.index('--db')+1]==self.path and '--task' in args and args[args.index('--task')+1]==str(row['id']):
+                            os.killpg(row['worker_pid'],signal.SIGKILL)
+                    except (OSError,ValueError,IndexError,subprocess.TimeoutExpired):
+                        pass
+            db.execute("UPDATE application_tasks SET status='interrupted',message='Dashboard restarted during preparation. Inspect the browser form before retrying; nothing was marked Applied.',updated_at=? WHERE status='running'",(store.now(),))
 
     def snapshot(self):
         self.reap()
@@ -62,6 +76,8 @@ class App:
         with store.connect(self.path) as db:
             return dict(jobs=store.library(db),
                 workflows=workflows.summaries(db),
+                application_tasks=[dict(r) | {'has_review_image':(applications.folder(self.path,r['id'])/'review.png').is_file()} for r in db.execute("SELECT * FROM application_tasks WHERE status IN ('running','queued','ready_review','needs_answers','needs_login','needs_browser','interrupted','needs_attention') OR id IN (SELECT id FROM application_tasks ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
+                application_cv=applications.cv_path(self.path).is_file(),
                 posting_counts={'open':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status='open'").fetchone()[0],
                     'closed':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status='closed'").fetchone()[0],
                     'unverified':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status NOT IN ('open','closed')").fetchone()[0]},
@@ -73,6 +89,7 @@ class App:
 
     def reap(self):
         with self.lock:
+            self.reap_applications()
             for rid, process in list(self.processes.items()):
                 code = process.poll()
                 if code is not None:
@@ -293,8 +310,49 @@ class App:
     def suspend(self):
         """Closing the server preserves the queue for the next launch."""
         with self.lock:
+            for tid in list(self.application_processes):
+                self.stop_application(tid,'interrupted','Dashboard closed during preparation. Inspect the existing form before retrying.')
             for rid in list(self.processes):
                 self.stop(rid,'interrupted','Dashboard closed. Saved progress will resume when it opens again.')
+
+    def reap_applications(self):
+        for tid,process in list(self.application_processes.items()):
+            if process.poll() is not None:
+                with store.connect(self.path) as db:
+                    db.execute("UPDATE application_tasks SET status='needs_attention',message='Application agent exited before finishing. Inspect the browser form before retrying.',updated_at=? WHERE id=? AND status='running'",(store.now(),tid))
+                del self.application_processes[tid]
+            elif time.monotonic()-process.started>1200:
+                self.stop_application(tid,'needs_attention','Preparation reached its 20-minute limit. Inspect the existing form before retrying.')
+        if self.application_processes:return
+        with store.connect(self.path) as db:
+            row=db.execute("SELECT id FROM application_tasks WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            if not row:return
+            tid=row['id']
+            db.execute("UPDATE application_tasks SET status='running',heartbeat=?,updated_at=?,message='Starting review-only Luna application agent…' WHERE id=?",(store.now(),store.now(),tid))
+        try:
+            process=subprocess.Popen([sys.executable,'-m','dashboard.applications','--db',self.path,'--task',str(tid)],cwd=ROOT,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            process.started=time.monotonic();self.application_processes[tid]=process
+            with store.connect(self.path) as db:db.execute('UPDATE application_tasks SET worker_pid=? WHERE id=?',(getattr(process,'pid',None),tid))
+        except OSError:
+            with store.connect(self.path) as db:db.execute("UPDATE application_tasks SET status='needs_attention',message='Could not start the application agent.',updated_at=? WHERE id=?",(store.now(),tid))
+
+    def stop_application(self,tid,status='cancelled',message='Preparation stopped. Inspect the existing browser form before retrying.'):
+        with self.lock:
+            process=self.application_processes.pop(tid,None)
+            if process:
+                try:
+                    if os.name=='posix':os.killpg(process.pid,signal.SIGTERM)
+                    elif os.name=='nt':subprocess.run(['taskkill','/PID',str(process.pid),'/T','/F'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5)
+                    else:process.terminate()
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    if os.name=='posix':os.killpg(process.pid,signal.SIGKILL)
+                    else:process.kill()
+                    process.wait()
+                except ProcessLookupError:pass
+            with store.connect(self.path) as db:
+                db.execute("UPDATE application_tasks SET status=?,message=?,updated_at=? WHERE id=? AND status IN ('running','queued')",(status,message,store.now(),tid))
+            return {'ok':True}
 
     def start_ratings(self):
         with self.lock:
@@ -374,6 +432,25 @@ class App:
             return self.resume_workflow(data.get('workflow_id'))
         if route == '/api/availability/run':
             return self.start_availability(data)
+        if route == '/api/applications/start':
+            if data.get('review_only') is not True:raise ValueError('The application agent only prepares forms for your review.')
+            with self.lock:
+                result=applications.enqueue(self.path,str(data.get('job_id','')))
+                self.reap_applications()
+                return result
+        if route == '/api/application-cv':
+            with self.lock:
+                return applications.save_cv(self.path,data.get('pdf'))
+        if len(bits)==4 and bits[:2]==['api','applications']:
+            tid=int(bits[2])
+            if bits[3]=='stop':return self.stop_application(tid)
+            if bits[3]=='retry':
+                with self.lock:
+                    result=applications.retry(self.path,tid,data.get('answers',{}));self.reap_applications();return result
+            if bits[3]=='confirm-submitted':
+                if data.get('submitted_by_me') is not True:raise ValueError('Confirm that you submitted the application yourself.')
+                with self.lock:
+                    return applications.mark_submitted(self.path,tid)
         if route == '/api/jobs':
             with store.connect(self.path) as db:
                 jid, created = store.upsert(db, data, tracking=True)
@@ -412,13 +489,13 @@ class App:
         if len(bits) == 4 and bits[:2] == ['api', 'runs'] and bits[3] == 'stop':
             return self.stop(int(bits[2]))
         if route == '/api/settings':
-            allowed = set(rating.PROFILE_FIELDS)
+            allowed = set(rating.PROFILE_FIELDS+applications.PROFILE_FIELDS)
             with store.connect(self.path) as db:
                 before = rating.settings_from(db)
                 for key in allowed & data.keys():
                     db.execute('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                                (key, json.dumps(str(data[key])[:100000])))
-                if any(before.get(k, '') != str(data[k])[:100000] for k in allowed & data.keys()):
+                if any(before.get(k, '') != str(data[k])[:100000] for k in set(rating.PROFILE_FIELDS) & data.keys()):
                     db.execute("UPDATE jobs SET rating_status='pending',rating_error='Profile changed; waiting for a fresh rating.'")
             return {'ok': True}
         if route == '/api/ratings/run':
@@ -516,6 +593,12 @@ class Handler(BaseHTTPRequestHandler):
         app = self.server.app
         if route == '/api/state':
             self.reply(200, app.snapshot())
+        elif re.fullmatch(r'/api/applications/\d+/review-image',route):
+            try:
+                body,mime=applications.review_image(app.path,int(route.split('/')[3]))
+                self.reply(200,body,mime)
+            except LookupError as error:
+                self.reply(404,{'error':str(error)})
         elif route == '/api/export':
             with store.connect(app.path) as db:
                 jobs = [dict(r) for r in db.execute('SELECT * FROM jobs')]

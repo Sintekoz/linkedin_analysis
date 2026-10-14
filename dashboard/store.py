@@ -83,6 +83,17 @@ def init(path):
         CREATE TABLE IF NOT EXISTS run_jobs (
           run_id INTEGER REFERENCES runs(id), job_id TEXT REFERENCES jobs(id),
           PRIMARY KEY(run_id,job_id));
+        CREATE TABLE IF NOT EXISTS application_tasks (
+          id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id),
+          target_url TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'queued', message TEXT NOT NULL DEFAULT '',
+          result TEXT NOT NULL DEFAULT '{}', answers TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, heartbeat TEXT DEFAULT '',
+          worker_pid INTEGER);
+        CREATE UNIQUE INDEX IF NOT EXISTS application_task_active ON application_tasks(job_id)
+          WHERE status IN ('queued','running','ready_review','needs_answers','needs_login','needs_browser','interrupted','needs_attention');
+        CREATE UNIQUE INDEX IF NOT EXISTS application_target_active ON application_tasks(target_url)
+          WHERE target_url!='' AND status IN ('queued','running','ready_review','needs_answers','needs_login','needs_browser','interrupted','needs_attention','submitted_by_user');
         ''')
         # Additive migrations preserve existing workspaces and application records.
         migrations = {
