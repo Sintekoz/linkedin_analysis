@@ -21,6 +21,7 @@ from . import store
 from .collectors import validate_config, PROVIDERS
 from . import rating
 from . import workflows
+from . import availability
 from .locations import classify_location
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,8 @@ class App:
                         pass
             db.execute("UPDATE runs SET status='queued',phase='queued',attempts=MAX(0,attempts-1),worker_pid=NULL,finished_at=NULL,message='Resuming saved progress after restart.' WHERE status IN ('running','interrupted') AND workflow_id IN (SELECT id FROM workflows WHERE status='running')")
             db.execute("UPDATE runs SET status='interrupted',message='Dashboard restarted before collection or rating finished. Saved jobs are retained.',finished_at=? WHERE status IN ('running','queued') AND workflow_id IS NULL", (store.now(),))
+            for workflow in db.execute("SELECT id FROM workflows w WHERE status='running' AND EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='rating') AND EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='collection') AND NOT EXISTS(SELECT 1 FROM runs WHERE workflow_id=w.id AND kind='availability')").fetchall():
+                db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at,workflow_id) VALUES(?,'{}','queued','availability','queued',?,?,?)",('Posting availability','Checking saved vacancies after collection finishes.',store.now(),workflow['id']))
 
     def snapshot(self):
         self.reap()
@@ -59,6 +62,9 @@ class App:
         with store.connect(self.path) as db:
             return dict(jobs=store.library(db),
                 workflows=workflows.summaries(db),
+                posting_counts={'open':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status='open'").fetchone()[0],
+                    'closed':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status='closed'").fetchone()[0],
+                    'unverified':db.execute("SELECT COUNT(*) FROM jobs WHERE duplicate_of='' AND posting_status NOT IN ('open','closed')").fetchone()[0]},
                 duplicates=db.execute("SELECT count(*) FROM jobs WHERE duplicate_of!=''").fetchone()[0],
                 sources=[dict(r) | {'config': json.loads(r['config'])} for r in db.execute('SELECT * FROM sources ORDER BY id DESC')],
                 runs=[dict(r) for r in db.execute("SELECT * FROM runs WHERE status IN ('running','queued','retry_wait') OR workflow_id IN (SELECT id FROM workflows WHERE status='running') OR workflow_id IN (SELECT id FROM workflows ORDER BY id DESC LIMIT 20) OR id IN (SELECT id FROM runs ORDER BY id DESC LIMIT 100) ORDER BY id DESC")],
@@ -140,6 +146,10 @@ class App:
             if not row:
                 return
             rid = row['id']
+            step=db.execute('SELECT kind,config FROM runs WHERE id=?',(rid,)).fetchone()
+            if step['kind']=='availability' and 'availability_ids' not in json.loads(step['config']):
+                ids=[r[0] for r in db.execute("SELECT id FROM jobs WHERE duplicate_of='' ORDER BY CASE WHEN stage IN ('saved','applied','interview','offer') THEN 0 ELSE 1 END,created_at DESC")]
+                db.execute('UPDATE runs SET config=? WHERE id=?',(json.dumps({'availability_ids':ids}),rid))
             db.execute("UPDATE runs SET status='running',phase='collecting',attempts=attempts+1,provider_blocked=0,error_kind='',rating_error='',retry_at='',finished_at=NULL,heartbeat=?,message='Working from saved progress; ratings run automatically.' WHERE id=?", (store.now(), rid))
         try:
             self.launch(rid)
@@ -220,6 +230,8 @@ class App:
                     db.execute('UPDATE runs SET workflow_id=? WHERE id=?',(wid,rid))
                 for jid in waiting:
                     workflows.remember(db,wid,jid)
+                if include_waiting:
+                    ids.append(db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at,workflow_id) VALUES(?,'{}','queued','availability','queued',?,?,?)",('Posting availability','Checking saved vacancies after collection finishes.',store.now(),wid)).lastrowid)
             self.launch_next()
             return {'ids': ids, 'queued': len(ids), 'workflow_id':wid}
 
@@ -304,6 +316,25 @@ class App:
             self.launch_next()
             return {'id':rid,'workflow_id':wid}
 
+    def start_availability(self,data):
+        with self.lock:
+            self.reap()
+            with store.connect(self.path) as db:
+                if db.execute("SELECT 1 FROM runs WHERE status IN ('running','queued','retry_wait')").fetchone():
+                    raise ValueError('A workflow is already active. Its queued availability step will run after collection.')
+                selected=data.get('job_ids')
+                if selected is not None and (not isinstance(selected,list) or not selected or any(not isinstance(j,str) for j in selected)):
+                    raise ValueError('Choose valid jobs to check.')
+                ids=[r[0] for r in db.execute("SELECT id FROM jobs WHERE duplicate_of='' ORDER BY CASE WHEN stage IN ('saved','applied','interview','offer') THEN 0 ELSE 1 END,created_at DESC")]
+                if selected is not None:
+                    if not set(selected)<=set(ids):raise LookupError('A selected job was not found.')
+                    ids=[j for j in ids if j in selected]
+                if not ids:raise ValueError('No saved jobs to check.')
+                wid=db.execute('INSERT INTO workflows(started_at) VALUES(?)',(store.now(),)).lastrowid
+                rid=db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at,workflow_id) VALUES(?,?,'queued','availability','queued',?,?,?)",('Posting availability',json.dumps({'availability_ids':ids}),'Checking public posting status. No model tokens are used.',store.now(),wid)).lastrowid
+            self.launch_next()
+            return {'id':rid,'workflow_id':wid}
+
     def stop(self, rid, status='cancelled', message='Stopped by you. Already saved jobs are retained.'):
         with self.lock:
             process = self.processes.get(rid)
@@ -341,10 +372,18 @@ class App:
             return self.start_workflow()
         if route == '/api/workflow/resume':
             return self.resume_workflow(data.get('workflow_id'))
+        if route == '/api/availability/run':
+            return self.start_availability(data)
         if route == '/api/jobs':
             with store.connect(self.path) as db:
                 jid, created = store.upsert(db, data, tracking=True)
                 job = dict(db.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone())
+                if 'availability' in data:
+                    chosen={'ongoing':'open','cancelled':'closed','deleted':'closed','unknown':'unverified'}.get(data['availability'],data['availability'])
+                    if chosen not in ('open','closed','unverified'):
+                        raise ValueError('Choose open, closed or unverified availability.')
+                    if chosen!=(job['posting_status'] or 'unverified'):
+                        availability.record(db,jid,chosen,'Manually marked by you.')
                 location = classify_location(job)
                 db.execute('UPDATE jobs SET location_status=?,location_note=? WHERE id=?', (*location.values(), jid))
             return {'id': jid, 'created': created}

@@ -9,6 +9,7 @@ from .rating import rate_jobs
 from .locations import classify_location
 from .collectors import PROVIDERS
 from . import workflows
+from . import availability
 
 
 def collection_wait(path, config, run_id):
@@ -30,6 +31,13 @@ def run(path, run_id):
         row = dict(db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
         config = json.loads(row['config'])
         saved_ids = [r[0] for r in db.execute('SELECT job_id FROM run_jobs WHERE run_id=?', (run_id,))]
+    if row['kind']=='availability':
+        try:
+            availability.run_checks(path,run_id)
+        except Exception as error:
+            with connect(path) as db:
+                db.execute("UPDATE runs SET status='failed',phase='finished',error_kind='temporary',message=?,finished_at=? WHERE id=? AND status='running'",('Availability worker interrupted. Saved checks are retained. '+str(error)[:300],now(),run_id))
+        return
     found, added, updated = (row[k] for k in ('found','added','updated'))
     ids = list(dict.fromkeys(list(config.get('job_ids', []))+saved_ids))
     collection_error = ''
@@ -60,6 +68,7 @@ def run(path, run_id):
                 if state != 'running':
                     return
                 jid, created = upsert(db, dict(job) | classify_location(job))
+                availability.seen(db,jid,job)
                 if jid not in ids:
                     ids.append(jid)
                     found += 1

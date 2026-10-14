@@ -16,6 +16,9 @@ JOB_FIELDS = ('title', 'company', 'location', 'description', 'url', 'direct_url'
               'work_model', 'job_type', 'salary_min', 'salary_max', 'currency', 'salary_interval',
               'industry', 'job_level', 'job_function', 'applicants', 'availability', 'source', 'raw_json',
               'location_status', 'location_note')
+POSTING_FIELDS = ('posting_status','posting_checked_at','posting_confirmed_at','posting_last_confirmed',
+                  'posting_reason','posting_last_seen_at')
+JOB_FIELDS += POSTING_FIELDS
 TRACK_FIELDS = ('stage', 'notes', 'follow_up', 'contact', 'applied_date')
 FIT_FIELDS = ('title', 'company', 'location', 'description', 'work_model', 'job_type',
               'salary_min', 'salary_max', 'currency', 'salary_interval', 'industry', 'job_level', 'job_function')
@@ -98,6 +101,7 @@ def init(path):
                      'checkpoint': "TEXT DEFAULT '{}'", 'collection_done': 'INTEGER DEFAULT 0',
                      'worker_pid': 'INTEGER'},
         }
+        migrations['jobs'].update({k:"TEXT DEFAULT ''" for k in POSTING_FIELDS})
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
             for name, definition in fields.items():
@@ -270,6 +274,7 @@ def upsert(db, data, tracking=False):
         job_id = existing['id']
         remember_links(db, job_id, data)
         if not tracking:
+            values.pop('availability',None)
             # Keep the original platform URL/provenance when another board
             # points to the same employer posting. Aliases retain the new links.
             for key in ('url', 'source', 'direct_url'):

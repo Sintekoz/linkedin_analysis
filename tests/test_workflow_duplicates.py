@@ -107,23 +107,23 @@ class WorkflowDuplicateTests(unittest.TestCase):
         other=self.job('new',direct='https://careers.example.com/jobs/234567')
         cross=other|{'source':'linkedin','url':'https://www.linkedin.com/jobs/view/234567/'}
         final=self.job('final',direct='https://careers.example.com/jobs/345678')
-        with patch('dashboard.server.subprocess.Popen',side_effect=lambda *a,**k:source_tests.FakeProcess()) as launch, patch('dashboard.rating.review_batch',side_effect=self.reviews) as model, patch('dashboard.worker.collection_wait',return_value=0):
+        with patch('dashboard.server.subprocess.Popen',side_effect=lambda *a,**k:source_tests.FakeProcess()) as launch, patch('dashboard.rating.review_batch',side_effect=self.reviews) as model, patch('dashboard.worker.collection_wait',return_value=0), patch('dashboard.availability.check_link',return_value=('open','Test published posting')), patch('dashboard.availability.time.sleep'):
             result=self.app.mutate('/api/workflow/start',{})
             repeated=self.app.mutate('/api/workflow/start',{})
             self.assertTrue(repeated['active'])
-            self.assertEqual(len(result['ids']),3)
+            self.assertEqual(len(result['ids']),4)
             self.assertEqual(launch.call_count,1)
             for index,rid in enumerate(result['ids']):
                 jobs=[] if index==0 else [self.job('existing'),other] if index==1 else [cross,final]
                 with patch('dashboard.worker.collect',return_value=iter(jobs)) as collect:
                     run(self.path,rid)
-                    if index==0:collect.assert_not_called()
+                    if index in (0,3):collect.assert_not_called()
                     else:collect.assert_called_once()
                 self.app.processes[rid].code=0
                 self.app.reap()
             self.assertFalse(self.app.processes)
             self.assertEqual(model.call_count,3)
-            self.assertEqual(launch.call_count,3)
+            self.assertEqual(launch.call_count,4)
         snapshot=self.app.snapshot()
         self.assertEqual(len(snapshot['jobs']),3)
         self.assertTrue(all(j['rating_status']=='complete' for j in snapshot['jobs']))
@@ -135,7 +135,7 @@ class WorkflowDuplicateTests(unittest.TestCase):
             store.upsert(db,self.job('existing'))
         with patch('dashboard.server.subprocess.Popen',return_value=source_tests.FakeProcess()):
             ids=self.app.start_workflow()['ids']
-        self.assertEqual(len(ids),1)
+        self.assertEqual(len(ids),2)
         with store.connect(self.path) as db:
             self.assertEqual(db.execute('SELECT kind FROM runs WHERE id=?',(ids[0],)).fetchone()[0],'rating')
 

@@ -125,7 +125,7 @@ class RecoveryTests(unittest.TestCase):
                 source=db.execute('SELECT * FROM sources WHERE id=?',(sid,)).fetchone()
                 db.execute('INSERT INTO runs(source_id,name,config,status,started_at) VALUES(?,?,?,?,?)',(sid,source['name'],source['config'],status,store.now()))
         result=self.app.resume_workflow()
-        self.assertEqual([r['source_id'] for r in self.rows() if r['workflow_id']==result['workflow_id']],[1,2])
+        self.assertEqual([r['source_id'] for r in self.rows() if r['workflow_id']==result['workflow_id'] and r['source_id']],[1,2])
 
     def test_launch_failure_retries_three_times_then_needs_attention(self):
         with patch('dashboard.server.subprocess.Popen',side_effect=OSError('Cannot start')):

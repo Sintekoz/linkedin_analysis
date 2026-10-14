@@ -54,13 +54,16 @@ def summaries(db):
         db.execute('UPDATE workflows SET status=?,finished_at=? WHERE id=?', (status, finished_at, workflow['id']))
         providers = {}
         for row in rows:
-            provider = json.loads(row['config']).get('provider', 'ratings' if row['kind']=='rating' else 'linkedin')
+            provider = json.loads(row['config']).get('provider', row['kind'] if row['kind'] in ('rating','availability') else 'linkedin')
             item = providers.setdefault(provider, {'total':0,'finished':0,'attention':0,'retrying':0})
             item['total'] += 1
             item['finished'] += int(row['status'] not in ACTIVE and row['status'] not in RECOVERABLE and row['status']!='cancelled')
             item['attention'] += int(row['status'] in RECOVERABLE)
             item['retrying'] += int(row['status']=='retry_wait')
+        checked=[r[0] for r in db.execute("SELECT j.posting_status FROM jobs j WHERE j.id IN (SELECT job_id FROM run_jobs WHERE run_id IN (SELECT id FROM runs WHERE workflow_id=? AND kind='availability'))",(workflow['id'],))]
         result.append(dict(workflow) | {'status':status,'finished_at':finished_at, **counts,
+            'availability_only':bool(rows) and all(r['kind']=='availability' for r in rows),
+            'availability_counts':{'checked':len(checked),'open':checked.count('open'),'closed':checked.count('closed'),'unverified':sum(s not in ('open','closed') for s in checked)},
             'searches': sum(r['kind']=='collection' for r in rows),
             'unique_jobs':len(jobs), 'added':sum(j['created'] for j in jobs),
             'refreshed':sum(not j['created'] and j['collected'] for j in jobs), 'ready':len(complete),
