@@ -83,6 +83,7 @@ def init(path):
         ''')
         # Additive migrations preserve existing workspaces and application records.
         migrations = {
+            'workflow_jobs': {'collected': 'INTEGER DEFAULT 0'},
             'jobs': {'rating_status': "TEXT DEFAULT 'pending'", 'rating_hash': "TEXT DEFAULT ''",
                      'rating_error': "TEXT DEFAULT ''", 'rating_model': "TEXT DEFAULT ''", 'rated_at': "TEXT DEFAULT ''",
                      'location_status': "TEXT DEFAULT 'unclear'", 'location_note': "TEXT DEFAULT ''",

@@ -66,7 +66,7 @@ def run(path, run_id):
                     added += int(created)
                     updated += int(not created)
                 db.execute('INSERT OR IGNORE INTO run_jobs(run_id,job_id) VALUES(?,?)', (run_id,jid))
-                workflows.remember(db,row['workflow_id'],jid,created)
+                workflows.remember(db,row['workflow_id'],jid,created,collected=True)
                 db.execute('UPDATE runs SET found=?,added=?,updated=?,message=?,heartbeat=? WHERE id=?',
                            (found, added, updated, 'Saving '+PROVIDERS.get(config.get('provider', 'linkedin'), 'job')+' results…', now(), run_id))
         with connect(path) as db:

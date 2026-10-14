@@ -166,6 +166,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result['ids'],first['ids'])
         self.assertEqual(self.app.snapshot()['workflows'][0]['id'],first['workflow_id'])
 
+    def test_existing_jobs_queued_for_rating_are_not_counted_as_refetched(self):
+        with store.connect(self.path) as db:store.upsert(db,{'id':'existing','title':'Data','description':'SQL'})
+        result=self.app.start_workflow()
+        summary=self.app.snapshot()['workflows'][0]
+        self.assertEqual((summary['unique_jobs'],summary['refreshed']),(1,0))
+        with store.connect(self.path) as db:workflows.remember(db,result['workflow_id'],'existing',collected=True)
+        self.assertEqual(self.app.snapshot()['workflows'][0]['refreshed'],1)
+
 
 class CheckpointTests(unittest.TestCase):
     def test_mid_page_timeout_resumes_last_fully_saved_batch(self):

@@ -26,12 +26,13 @@ def later(seconds):
     return (datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat(timespec='seconds')
 
 
-def remember(db, workflow_id, jid, created=False):
+def remember(db, workflow_id, jid, created=False, collected=False):
     if not workflow_id:
         return
     row = db.execute('SELECT rating_hash,rating_status FROM jobs WHERE id=?', (jid,)).fetchone()
-    db.execute('INSERT OR IGNORE INTO workflow_jobs(workflow_id,job_id,created,initial_hash) VALUES(?,?,?,?)',
-               (workflow_id, jid, int(created), row['rating_hash'] if row['rating_status']=='complete' else ''))
+    db.execute('''INSERT INTO workflow_jobs(workflow_id,job_id,created,initial_hash,collected) VALUES(?,?,?,?,?)
+        ON CONFLICT(workflow_id,job_id) DO UPDATE SET collected=MAX(workflow_jobs.collected,excluded.collected)''',
+               (workflow_id, jid, int(created), row['rating_hash'] if row['rating_status']=='complete' else '',int(collected)))
 
 
 def summaries(db):
@@ -43,7 +44,7 @@ def summaries(db):
             status = row['status']
             key = 'running' if status=='running' else 'queued' if status=='queued' else 'retrying' if status=='retry_wait' else 'attention' if status in RECOVERABLE else 'stopped' if status=='cancelled' else 'finished'
             counts[key] += 1
-        jobs = db.execute('''SELECT j.id,j.rating_status,j.rating_hash,w.created,w.initial_hash
+        jobs = db.execute('''SELECT j.id,j.rating_status,j.rating_hash,w.created,w.initial_hash,w.collected
             FROM workflow_jobs w JOIN jobs j ON j.id=w.job_id WHERE w.workflow_id=? AND j.duplicate_of='' ''', (workflow['id'],)).fetchall()
         complete = [j for j in jobs if j['rating_status']=='complete']
         active = counts['running']+counts['queued']+counts['retrying']
@@ -62,7 +63,7 @@ def summaries(db):
         result.append(dict(workflow) | {'status':status,'finished_at':finished_at, **counts,
             'searches': sum(r['kind']=='collection' for r in rows),
             'unique_jobs':len(jobs), 'added':sum(j['created'] for j in jobs),
-            'refreshed':sum(not j['created'] for j in jobs), 'ready':len(complete),
+            'refreshed':sum(not j['created'] and j['collected'] for j in jobs), 'ready':len(complete),
             'reused':sum(bool(j['initial_hash']) and j['initial_hash']==j['rating_hash'] for j in complete),
             'waiting':sum(j['rating_status'] not in ('complete','missing_description') for j in jobs),
             'missing_description':sum(j['rating_status']=='missing_description' for j in jobs),
