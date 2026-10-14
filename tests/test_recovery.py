@@ -94,6 +94,32 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(final['status'],'queued');self.assertEqual(json.loads(final['config']),{})
         self.assertEqual(json.loads(final['checkpoint'])['checked_ids'],['old'])
 
+    def test_successful_batches_renew_consecutive_failure_budget(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        with store.connect(self.path) as db:
+            cp=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(rid,)).fetchone()[0])
+            self.assertEqual(cp['attempt_start_offset'],0)
+            cp.update(offset=50,found=50)
+            db.execute('UPDATE runs SET checkpoint=?,attempts=3 WHERE id=?',(json.dumps(cp),rid))
+        self.end(rid,status='failed',provider_blocked=1,error_kind='provider_access')
+        row=self.rows()[0]
+        self.assertEqual(row['status'],'retry_wait');self.assertEqual(row['attempts'],1)
+    def test_three_failures_without_new_progress_still_stop(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        with store.connect(self.path) as db:
+            cp={'offset':50,'found':50,'attempt_start_offset':50,'attempt_start_found':50}
+            db.execute('UPDATE runs SET checkpoint=?,attempts=3 WHERE id=?',(json.dumps(cp),rid))
+        self.end(rid,status='failed',provider_blocked=1,error_kind='provider_access')
+        self.assertEqual(self.rows()[0]['status'],'needs_attention')
+    def test_worker_checkpoint_preserves_attempt_start_and_diagnostic_markers(self):
+        rid=self.app.start_all({'source_ids':[1]})['ids'][0]
+        def collect(config,**options):
+            options['save_checkpoint']({'offset':10,'found':10})
+            return iter([])
+        with patch('dashboard.worker.collect',side_effect=collect),patch('dashboard.worker.collection_wait',return_value=0):run(self.path,rid)
+        cp=json.loads(self.rows()[0]['checkpoint'])
+        self.assertEqual(cp['offset'],10);self.assertEqual(cp['attempt_start_offset'],0)
+
     def test_latest_collection_error_survives_cooldown_messages(self):
         rid=self.app.start_all({'source_ids':[1]})['ids'][0]
         from dashboard.collectors import ProviderBlocked

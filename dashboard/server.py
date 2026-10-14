@@ -137,8 +137,13 @@ class App:
                 db.execute('UPDATE runs SET config=? WHERE id=?',(json.dumps(config),queued['id']))
         if row['status'] not in ('failed','timed_out','completed_with_warnings'):
             return
-        if kind in ('temporary','provider_access') and row['attempts'] < workflows.MAX_ATTEMPTS:
-            delay = (120 if kind=='provider_access' else 30) * (4**max(0,row['attempts']-1))
+        checkpoint=json.loads(row['checkpoint'])
+        progressed=row['kind']=='collection' and 'attempt_start_offset' in checkpoint and (checkpoint.get('offset',0)>checkpoint['attempt_start_offset'] or checkpoint.get('found',0)>checkpoint.get('attempt_start_found',0))
+        attempts=1 if progressed else row['attempts']
+        if progressed and kind in ('temporary','provider_access'):
+            db.execute('UPDATE runs SET attempts=1 WHERE id=?',(row['id'],))
+        if kind in ('temporary','provider_access') and attempts < workflows.MAX_ATTEMPTS:
+            delay = (120 if kind=='provider_access' else 30) * (4**max(0,attempts-1))
             retry_at=workflows.later(delay)
             db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message=?,finished_at=NULL WHERE id=?",(retry_at,'Temporary interruption. Saved progress will retry automatically; other platforms can continue.',row['id']))
             if kind=='provider_access':
@@ -163,7 +168,11 @@ class App:
             if not row:
                 return
             rid = row['id']
-            step=db.execute('SELECT kind,config FROM runs WHERE id=?',(rid,)).fetchone()
+            step=db.execute('SELECT kind,config,checkpoint FROM runs WHERE id=?',(rid,)).fetchone()
+            if step['kind']=='collection':
+                checkpoint=json.loads(step['checkpoint'])
+                checkpoint.update(attempt_start_offset=checkpoint.get('offset',0),attempt_start_found=checkpoint.get('found',0))
+                db.execute('UPDATE runs SET checkpoint=? WHERE id=?',(json.dumps(checkpoint),rid))
             if step['kind']=='availability' and 'availability_ids' not in json.loads(step['config']):
                 ids=[r[0] for r in db.execute("SELECT id FROM jobs WHERE duplicate_of='' ORDER BY CASE WHEN stage IN ('saved','applied','interview','offer') THEN 0 ELSE 1 END,created_at DESC")]
                 db.execute('UPDATE runs SET config=? WHERE id=?',(json.dumps({'availability_ids':ids}),rid))

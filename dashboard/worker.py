@@ -50,7 +50,8 @@ def run(path, run_id):
                 raise RuntimeError('Collection stopped.')
     def save_checkpoint(value):
         with connect(path) as db:
-            db.execute("UPDATE runs SET checkpoint=?,heartbeat=? WHERE id=? AND status='running'", (json.dumps(value),now(),run_id))
+            previous=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(run_id,)).fetchone()[0])
+            db.execute("UPDATE runs SET checkpoint=?,heartbeat=? WHERE id=? AND status='running'", (json.dumps(previous | value),now(),run_id))
     try:
         pause = collection_wait(path, config, run_id) if not row['collection_done'] else 0
         if pause:
