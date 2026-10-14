@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from .locations import in_scope
+from . import network
 
 
 class TextParser(HTMLParser):
@@ -45,23 +46,9 @@ def text_html(value):
 
 
 def read_json(url):
-    context = ssl.create_default_context()
-    try:
-        import certifi
-        context.load_verify_locations(certifi.where())
-    except ImportError:
-        pass
-    try:
-        request = Request(url, headers={'Accept': 'application/json', 'User-Agent': 'NextRole/1.0 (personal job-search tool)'})
-        with urlopen(request, context=context, timeout=30) as response:
-            raw = response.read(10_000_001)
-        if len(raw) > 10_000_000:
-            raise RuntimeError('Employer feed exceeded the 10 MB response limit.')
-        return json.loads(raw)
-    except HTTPError as error:
-        raise RuntimeError('Employer feed returned HTTP '+str(error.code)+'. Check the board name or try later.')
-    except (URLError, ValueError) as error:
-        raise RuntimeError('Employer feed could not be read: '+str(error)[:200])
+    code,final,body=network.fetch(url)
+    if code!=200 or final!=url:raise RuntimeError('Employer feed returned HTTP '+str(code)+'. Check the board name or try later.')
+    return json.loads(body)
 
 
 def greenhouse_job(row, config):
@@ -122,9 +109,12 @@ def matches(job, config):
     return True
 
 
-def collect_ats(config, progress=None):
-    found = 0
-    scanned, pages, seen = 0, 0, set()
+def collect_ats(config, progress=None, checkpoint=None, save_checkpoint=None, page_budget=None):
+    checkpoint=checkpoint or {}
+    found,scanned,pages=(checkpoint.get(k,0) for k in ('found','scanned','pages'))
+    seen=set(checkpoint.get('seen',[]))
+    def save(offset,complete):
+        if save_checkpoint:save_checkpoint(dict(offset=offset,found=found,scanned=scanned,pages=pages,seen=list(seen),complete=complete))
     def report(note):
         if progress:
             progress(pages, scanned, note)
@@ -144,12 +134,15 @@ def collect_ats(config, progress=None):
                 yield job
                 found += 1
                 if config['limit'] is not None and found >= config['limit']:
+                    save(0,True)
                     report('Reached your optional result limit.')
                     return
         report('Checked the complete published employer feed.')
+        save(0,True)
     else:
         host = 'api.eu.lever.co' if config['region'] == 'eu' else 'api.lever.co'
-        skip = 0
+        skip = checkpoint.get('offset',0)
+        starting_pages=pages
         while True:
             report(f'Reading employer postings from position {skip + 1}…')
             query = {'mode': 'json', 'limit': 100, 'skip': skip}
@@ -172,11 +165,17 @@ def collect_ats(config, progress=None):
                     yield job
                     found += 1
                     if config['limit'] is not None and found >= config['limit']:
+                        save(skip+100,True)
                         report('Reached your optional result limit.')
                         return
             if len(rows) < 100:
+                save(skip+100,True)
                 report('Checked all postings exposed by the employer feed.')
                 return
             if not new:
                 raise RuntimeError('Employer feed repeated the same page. Stopped to avoid an endless loop; saved jobs are retained.')
             skip += 100
+            save(skip,False)
+            if page_budget and pages-starting_pages>=page_budget:
+                report('Page saved. Other searches will get a turn before this feed continues.')
+                return

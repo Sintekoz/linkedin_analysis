@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from .ats import collect_ats
 from urllib.parse import urlsplit, parse_qs
+from . import network
 
 PROVIDERS = {'linkedin': 'LinkedIn', 'indeed': 'Indeed', 'glassdoor': 'Glassdoor',
              'greenhouse': 'Greenhouse', 'lever': 'Lever'}
@@ -138,10 +139,10 @@ def normalize(row, provider='linkedin'):
         raw_json=json.dumps(r, default=str))
 
 
-def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
+def collect(config, progress=None, checkpoint=None, save_checkpoint=None, page_budget=None):
     config = validate_config(config)
     if config['provider'] in ('greenhouse', 'lever'):
-        yield from collect_ats(config, progress)
+        yield from collect_ats(config, progress, checkpoint, save_checkpoint, page_budget)
         return
     try:
         from jobspy import scrape_jobs
@@ -156,7 +157,7 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
                 hours_old=config['hours_old'], description_format='markdown', verbose=1)
     # JobSpy renamed this option; support both released signatures.
     key = 'fetch_description' if 'fetch_description' in inspect.signature(scrape_jobs).parameters else 'linkedin_fetch_description'
-    args[key] = config['description']
+    args[key] = config['description'] and not page_budget
     if config['provider'] in ('indeed', 'glassdoor'):
         args['country_indeed'] = config['country']
     if config['remote']:
@@ -173,6 +174,7 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
     description_deferred=bool(checkpoint.get('description_deferred',False))
     if description_deferred:args[key]=False
     offset, found, scanned, pages = (checkpoint.get(k, 0) for k in ('offset','found','scanned','pages'))
+    starting_pages=pages
     def report(note):
         if progress:
             suffix=f' {description_failures} description pages unavailable; existing descriptions are retained and listings continue.' if description_failures else ''
@@ -181,9 +183,13 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
         report(f"Requesting {PROVIDERS[config['provider']]} results from position {offset + 1}…")
         messages = ProviderMessages()
         logger.addHandler(messages)
+        network.event('search_request',config['provider']+':search')
         try:
             with description_guard(messages,config['provider']=='linkedin' and args[key]):
                 frame = scrape_jobs(**args, results_wanted=page_size, offset=offset)
+        except Exception:
+            network.event('search_failed',config['provider']+':search')
+            raise
         finally:
             logger.removeHandler(messages)
         rows = frame.to_dict(orient='records')
@@ -198,7 +204,7 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
             seen.add(identity)
             new += 1
             job = normalize(row, config['provider'])
-            if config['provider'] == 'linkedin':
+            if config['provider'] == 'linkedin' and not page_budget:
                 if config['remote']:
                     if not re.search(r'\bremote\b', job['work_model']+' '+str(job['title']), re.I):
                         continue
@@ -225,13 +231,17 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
         # All yielded rows are now saved. Failed searches retry this same offset;
         # successful pages advance even when description fetching was denied.
         if save_checkpoint:
+            complete=not errors and not blocked and (not rows or not new or len(rows)<page_size or config['limit'] is not None and found>=config['limit'])
             save_checkpoint({'offset':offset if errors or blocked else offset+page_size,
                              'found':found,'scanned':scanned,'pages':pages,'seen':list(seen),
-                             'description_failures':description_failures,'description_deferred':description_deferred})
+                             'description_failures':description_failures,'description_deferred':description_deferred,'complete':complete})
         if blocked:
+            network.event('search_blocked',config['provider']+':search')
             raise ProviderBlocked(PROVIDERS[config['provider']]+' search denied or rate-limited: '+blocked[0]+'. Saved jobs are retained; other platforms and posting checks can continue.')
         if errors:
+            network.event('search_failed',config['provider']+':search')
             raise RuntimeError(PROVIDERS[config['provider']]+' could not finish search collection: '+errors[0])
+        network.event('search_success',config['provider']+':search')
         if config['limit'] is not None and found >= config['limit']:
             report('Reached your optional result limit.')
             return
@@ -245,5 +255,8 @@ def collect(config, progress=None, checkpoint=None, save_checkpoint=None):
             report('The source returned a final partial batch. No further results were exposed; coverage is not guaranteed.')
             return
         offset += page_size
+        if page_budget and pages-starting_pages>=page_budget:
+            report('Page saved. Other searches will get a turn before this search continues.')
+            return
         report('Saved this batch; waiting briefly before requesting more results…')
         time.sleep(30 if config['provider']=='linkedin' else 5)

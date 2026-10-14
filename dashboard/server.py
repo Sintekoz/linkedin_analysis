@@ -24,6 +24,7 @@ from . import rating
 from . import workflows
 from . import availability
 from . import applications
+from . import enrichment, pipeline, network, employers
 from .locations import classify_location
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -97,7 +98,9 @@ class App:
                         db.execute("UPDATE runs SET status='failed',error_kind='temporary',message='Background process exited unexpectedly. Saved batches are retained.',finished_at=? WHERE id=? AND status='running'", (store.now(), rid))
                         outcome = db.execute('SELECT * FROM runs WHERE id=?', (rid,)).fetchone()
                         if outcome and outcome['workflow_id']:
-                            self.recover_run(db,outcome)
+                            if outcome['status']=='yielded':
+                                db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,finished_at=NULL WHERE id=?",(rid,))
+                            else:self.recover_run(db,outcome)
                         elif outcome and outcome['rating_error']:
                             for queued in db.execute("SELECT id,config FROM runs WHERE kind='collection' AND status='queued'").fetchall():
                                 config = json.loads(queued['config'])
@@ -150,6 +153,17 @@ class App:
         checkpoint=json.loads(row['checkpoint'])
         progressed=row['kind']=='collection' and 'attempt_start_offset' in checkpoint and (checkpoint.get('offset',0)>checkpoint['attempt_start_offset'] or checkpoint.get('found',0)>checkpoint.get('attempt_start_found',0))
         attempts=1 if progressed else row['attempts']
+        config=json.loads(row['config'])
+        if config.get('_pipeline') and row['kind']=='collection' and kind=='provider_access':
+            key=pipeline.search_key(config)
+            previous=db.execute('SELECT * FROM endpoint_health WHERE endpoint=?',(key,)).fetchone()
+            feed=config.get('provider') in ('greenhouse','lever')
+            attempts=1 if progressed else max(1,previous['failures'] if previous else row['attempts']) if feed else (previous['failures'] if previous else 0)+1
+            retry_at=max(previous['retry_at'] if previous else '',workflows.later(120*4**min(2,max(0,attempts-1))))
+            db.execute('''INSERT INTO endpoint_health(endpoint,retry_at,failures,reason,updated_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(endpoint) DO UPDATE SET retry_at=excluded.retry_at,failures=excluded.failures,
+                reason=excluded.reason,updated_at=excluded.updated_at''',
+                (key,retry_at,attempts,row['message'],store.now()))
         if progressed and kind in ('temporary','provider_access'):
             db.execute('UPDATE runs SET attempts=1 WHERE id=?',(row['id'],))
         if kind in ('temporary','provider_access') and attempts < workflows.MAX_ATTEMPTS:
@@ -174,7 +188,20 @@ class App:
             return
         with store.connect(self.path) as db:
             db.execute("UPDATE runs SET status='queued',phase='queued' WHERE status='retry_wait' AND retry_at<=?",(store.now(),))
-            row = db.execute("SELECT id FROM runs WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+            for workflow in db.execute("SELECT DISTINCT workflow_id FROM runs WHERE status IN ('queued','idle','retry_wait') AND workflow_id IS NOT NULL").fetchall():
+                pipeline.refresh(db,workflow[0])
+            candidates=[];checks=[]
+            items=db.execute("SELECT * FROM runs WHERE status='queued' ORDER BY id").fetchall()
+            items=sorted(items,key=lambda r:(r['dispatches'] if json.loads(r['config']).get('_pipeline') else 0,r['id']))
+            for item in items:
+                config=json.loads(item['config'])
+                if config.get('_pipeline') and item['kind']=='collection':
+                    state=db.execute('SELECT retry_at FROM endpoint_health WHERE endpoint=?',(pipeline.search_key(config),)).fetchone()
+                    if state and state['retry_at']>store.now():
+                        db.execute("UPDATE runs SET status='retry_wait',phase='waiting',retry_at=?,message='Platform request spacing or cooldown; other searches and queues continue.' WHERE id=?",(state['retry_at'],item['id']))
+                        continue
+                (checks if item['kind']=='availability' else candidates).append(item)
+            row=next(iter(candidates or checks),None)
             if not row:
                 return
             rid = row['id']
@@ -186,7 +213,7 @@ class App:
             if step['kind']=='availability' and 'availability_ids' not in json.loads(step['config']):
                 ids=[r[0] for r in db.execute("SELECT id FROM jobs WHERE duplicate_of='' ORDER BY CASE WHEN stage IN ('saved','applied','interview','offer') THEN 0 ELSE 1 END,created_at DESC")]
                 db.execute('UPDATE runs SET config=? WHERE id=?',(json.dumps({'availability_ids':ids}),rid))
-            db.execute("UPDATE runs SET status='running',phase='collecting',attempts=attempts+1,provider_blocked=0,error_kind='',rating_error='',retry_at='',finished_at=NULL,heartbeat=?,message='Working from saved progress; ratings run automatically.' WHERE id=?", (store.now(), rid))
+            db.execute("UPDATE runs SET status='running',phase='collecting',dispatches=dispatches+1,last_dispatched_at=?,attempts=attempts+1,provider_blocked=0,error_kind='',rating_error='',retry_at='',finished_at=NULL,heartbeat=?,message='Working from saved progress; ratings run automatically.' WHERE id=?", (store.now(),store.now(), rid))
         try:
             self.launch(rid)
         except Exception:
@@ -248,16 +275,21 @@ class App:
                     if not set(requested) <= {s['id'] for s in sources}:
                         raise LookupError('A selected search was not found.')
                     sources = [s for s in sources if s['id'] in requested]
-                waiting = [r['id'] for r in db.execute("SELECT id FROM jobs WHERE rating_status!='complete' AND duplicate_of='' ORDER BY created_at DESC")] if include_waiting else []
+                waiting=[]
+                if include_waiting:
+                    settings=rating.settings_from(db)
+                    waiting=[r['id'] for r in db.execute("SELECT * FROM jobs WHERE duplicate_of='' AND interest='interested' ORDER BY created_at DESC")
+                             if r['rating_status']!='complete' or r['rating_hash']!=rating.fingerprint(dict(r),settings)]
                 if not sources and not waiting:
                     raise ValueError('Add at least one search.')
                 ids = []
                 wid=db.execute('INSERT INTO workflows(started_at) VALUES(?)',(store.now(),)).lastrowid
-                if waiting:
+                if waiting and not include_waiting:
                     ids.append(db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at) VALUES(?,?,'queued','rating','queued',?,?)",
                         ('Existing job ratings', json.dumps({'job_ids': waiting}), 'Existing jobs will be checked automatically before collecting more.', store.now())).lastrowid)
                 for source in sources:
                     config = validate_config(json.loads(source['config']))
+                    if include_waiting:config['_pipeline']=2
                     if 'limit' in data:
                         config['limit'] = override
                     ids.append(db.execute("INSERT INTO runs(source_id,name,config,status,phase,message,started_at) VALUES(?,?,?,'queued','queued',?,?)",
@@ -266,7 +298,9 @@ class App:
                     db.execute('UPDATE runs SET workflow_id=? WHERE id=?',(wid,rid))
                 for jid in waiting:
                     workflows.remember(db,wid,jid)
+                    enrichment.enqueue(db,jid,retry=True)
                 if include_waiting:
+                    ids.extend(pipeline.add_steps(db,wid))
                     ids.append(db.execute("INSERT INTO runs(name,config,status,kind,phase,message,started_at,workflow_id) VALUES(?,'{}','queued','availability','queued',?,?,?)",('Posting availability','Checking saved vacancies after collection finishes.',store.now(),wid)).lastrowid)
             self.launch_next()
             return {'ids': ids, 'queued': len(ids), 'workflow_id':wid}
@@ -288,7 +322,7 @@ class App:
     def stop_all(self, status='cancelled', message='Workflow stopped. Saved jobs and ratings are retained.'):
         with self.lock:
             with store.connect(self.path) as db:
-                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE status IN ('queued','retry_wait')", (status, message, store.now()))
+                db.execute("UPDATE runs SET status=?,message=?,finished_at=? WHERE status IN ('queued','retry_wait','idle')", (status, message, store.now()))
                 if status=='cancelled':
                     db.execute("UPDATE workflows SET status='cancelled',finished_at=? WHERE status='running'",(store.now(),))
             for rid in list(self.processes):
@@ -319,6 +353,8 @@ class App:
                         raise ValueError('No unfinished steps remain in this workflow.')
                     for row in rows:
                         config=json.loads(row['config']);config.pop('rating_paused',None)
+                        if row['kind']=='enrichment':
+                            for item in db.execute('SELECT job_id FROM workflow_jobs WHERE workflow_id=?',(wid,)).fetchall():enrichment.enqueue(db,item[0],retry=True)
                         db.execute("UPDATE runs SET status='queued',phase='queued',attempts=0,retry_at='',error_kind='',rating_error='',config=?,finished_at=NULL,message='Resuming unfinished work from saved progress.' WHERE id=?",(json.dumps(config),row['id']))
                     recovered_ids=[r['id'] for r in rows]
                     if any(r['kind']=='collection' for r in rows):
@@ -510,7 +546,9 @@ class App:
             store.update_tracking(self.path, bits[2], data)
             return {'ok': True}
         if route == '/api/sources/run-all':
-            return self.start_all(data)
+            return self.start_all(data,include_waiting=True)
+        if route == '/api/sources/employers':
+            with store.connect(self.path) as db:return {'added':employers.add_catalog(db)}
         if route == '/api/runs/stop-all':
             return self.stop_all()
         if route == '/api/sources' or (len(bits) == 3 and bits[:2] == ['api', 'sources']):
@@ -527,7 +565,8 @@ class App:
                         raise LookupError('Search not found.')
             return {'id': sid}
         if len(bits) == 4 and bits[:2] == ['api', 'sources'] and bits[3] == 'run':
-            return self.start(int(bits[2]))
+            result=self.start_all({'source_ids':[int(bits[2])]},include_waiting=True)
+            return result | {'id':result['ids'][0]}
         if len(bits) == 4 and bits[:2] == ['api', 'runs'] and bits[3] == 'stop':
             return self.stop(int(bits[2]))
         if route == '/api/settings':

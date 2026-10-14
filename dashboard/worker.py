@@ -10,6 +10,7 @@ from .locations import classify_location
 from .collectors import PROVIDERS
 from . import workflows
 from . import availability
+from . import enrichment, network, pipeline, employers
 
 
 def collection_wait(path, config, run_id):
@@ -27,10 +28,20 @@ def collection_wait(path, config, run_id):
 
 
 def run(path, run_id):
+    with network.session(path,run_id):
+        return run_step(path,run_id)
+
+def run_step(path, run_id):
     with connect(path) as db:
         row = dict(db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
         config = json.loads(row['config'])
         saved_ids = [r[0] for r in db.execute('SELECT job_id FROM run_jobs WHERE run_id=?', (run_id,))]
+    if row['kind']=='enrichment':
+        enrichment.run_batch(path,run_id)
+        return
+    if row['kind']=='rating' and config.get('_pipeline'):
+        pipeline.rate_batch(path,run_id)
+        return
     if row['kind']=='availability':
         try:
             availability.run_checks(path,run_id)
@@ -53,7 +64,7 @@ def run(path, run_id):
             previous=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(run_id,)).fetchone()[0])
             db.execute("UPDATE runs SET checkpoint=?,heartbeat=? WHERE id=? AND status='running'", (json.dumps(previous | value),now(),run_id))
     try:
-        pause = collection_wait(path, config, run_id) if not row['collection_done'] else 0
+        pause = collection_wait(path, config, run_id) if not row['collection_done'] and not config.get('_pipeline') else 0
         if pause:
             with connect(path) as db:
                 db.execute("UPDATE runs SET phase='waiting',message='Spacing LinkedIn searches to reduce rate limiting…' WHERE id=? AND status='running'", (run_id,))
@@ -63,6 +74,8 @@ def run(path, run_id):
         options = {'progress':progress}
         if row['workflow_id']:
             options.update(checkpoint=json.loads(row['checkpoint']), save_checkpoint=save_checkpoint)
+        if config.get('_pipeline'):
+            options['page_budget']=1
         for job in ([] if 'job_ids' in config or row['collection_done'] else collect(config, **options)):
             with connect(path) as db:
                 state = db.execute('SELECT status FROM runs WHERE id=?', (run_id,)).fetchone()[0]
@@ -77,10 +90,17 @@ def run(path, run_id):
                     updated += int(not created)
                 db.execute('INSERT OR IGNORE INTO run_jobs(run_id,job_id) VALUES(?,?)', (run_id,jid))
                 workflows.remember(db,row['workflow_id'],jid,created,collected=True)
+                if config.get('_pipeline'):
+                    enrichment.enqueue(db,jid)
+                    employers.discover(db,job,row['workflow_id'])
+                    if job.get('description') and db.execute('SELECT description FROM jobs WHERE id=?',(jid,)).fetchone()[0]==job['description']:
+                        db.execute('UPDATE jobs SET description_source=?,description_fetched_at=? WHERE id=?',(job.get('direct_url') or job.get('url') or '',now(),jid))
                 db.execute('UPDATE runs SET found=?,added=?,updated=?,message=?,heartbeat=? WHERE id=?',
                            (found, added, updated, 'Saving '+PROVIDERS.get(config.get('provider', 'linkedin'), 'job')+' results…', now(), run_id))
         with connect(path) as db:
-            db.execute("UPDATE runs SET collection_done=1 WHERE id=? AND status='running'", (run_id,))
+            cp=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(run_id,)).fetchone()[0])
+            done=not config.get('_pipeline') or cp.get('complete',True)
+            db.execute("UPDATE runs SET collection_done=? WHERE id=? AND status='running'", (int(done),run_id))
     except Exception as error:
         collection_error = str(error)[:1000]
         provider_blocked = isinstance(error, ProviderBlocked)
@@ -88,6 +108,15 @@ def run(path, run_id):
             checkpoint=json.loads(db.execute('SELECT checkpoint FROM runs WHERE id=?',(run_id,)).fetchone()[0])
             checkpoint.update(last_collection_error=collection_error,last_collection_error_at=now())
             db.execute("UPDATE runs SET checkpoint=? WHERE id=? AND status='running'",(json.dumps(checkpoint),run_id))
+    if config.get('_pipeline'):
+        if not collection_error:network.success(path,pipeline.search_key(config))
+        pipeline.delay_search(path,config)
+        with connect(path) as db:
+            status='failed' if collection_error else 'completed' if done else 'yielded'
+            note=db.execute('SELECT collection_note FROM runs WHERE id=?',(run_id,)).fetchone()[0]
+            db.execute("UPDATE runs SET status=?,phase='finished',message=?,provider_blocked=?,error_kind=?,finished_at=? WHERE id=? AND status='running'",
+                       (status,collection_error or note or 'Saved results; descriptions and ratings have independent queues.',int(provider_blocked),workflows.error_kind(collection_error,provider_blocked) if collection_error else '',now(),run_id))
+        return
     try:
         counts = rate_jobs(path, ids, run_id, defer_reason=config.get('rating_paused', ''))
         status = 'failed' if collection_error else ('completed_with_warnings' if counts['unrated'] else 'completed')

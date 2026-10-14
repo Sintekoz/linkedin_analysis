@@ -10,12 +10,13 @@ from urllib.parse import urlsplit,urljoin,parse_qs,quote
 from urllib.request import Request,build_opener,HTTPSHandler,HTTPRedirectHandler
 from . import store
 from .duplicates import posting_link
+from . import network
 
 ALLOWED = ('linkedin.com','indeed.com','glassdoor.com','glassdoor.ie')
 EXACT = {'boards.greenhouse.io','job-boards.greenhouse.io','boards-api.greenhouse.io',
          'jobs.lever.co','jobs.eu.lever.co','api.lever.co','api.eu.lever.co','grnh.se'}
 
-class AccessBlocked(ValueError):pass
+AccessBlocked=network.AccessBlocked
 
 
 def allowed_url(url):
@@ -33,21 +34,7 @@ class RedirectGuard(HTTPRedirectHandler):
 
 
 def fetch(url):
-    allowed_url(url)
-    context=ssl.create_default_context()
-    try:
-        import certifi
-        context.load_verify_locations(certifi.where())
-    except ImportError:pass
-    opener=build_opener(HTTPSHandler(context=context),RedirectGuard())
-    try:
-        with opener.open(Request(url,headers={'User-Agent':'NextRole/1.0 (personal job-search tool)','Accept':'application/json,text/html'}),timeout=20) as response:
-            body=response.read(3_000_001)
-            if len(body)>3_000_000:raise ValueError('Posting response exceeded the safe response size.')
-            return response.status,response.geturl(),body.decode('utf-8',errors='replace')
-    except HTTPError as error:
-        if error.code in (401,403,429,999):raise AccessBlocked('Platform denied or rate-limited public access. Closure could not be verified.')
-        return error.code,error.geturl(),''
+    return network.fetch(url,max_bytes=10_000_000 if 'api.' in url or 'boards-api.' in url else 3_000_000)
 
 
 def ats_identity(url):
@@ -67,7 +54,7 @@ def published_ids(identity,cache):
         return value
     try:
         if provider=='greenhouse':
-            url='https://boards-api.greenhouse.io/v1/boards/'+quote(board,safe='')+'/jobs'
+            url='https://boards-api.greenhouse.io/v1/boards/'+quote(board,safe='')+'/jobs?content=true'
             code,final,body=fetch(url)
             if code!=200 or final!=url:raise ValueError('Employer board could not be verified (HTTP '+str(code)+').')
             payload=json.loads(body)
@@ -236,6 +223,12 @@ def run_checks(path,run_id):
         with store.connect(path) as db:
             if db.execute('SELECT status FROM runs WHERE id=?',(run_id,)).fetchone()[0]!='running':return
             record(db,jid,status,reason);done.add(jid)
+            from . import enrichment
+            if enrichment.reuse_cached(db,dict(job),links):
+                current=db.execute('SELECT description FROM jobs WHERE id=?',(jid,)).fetchone()
+                if current['description']!=job['description']:
+                    from . import workflows
+                    workflows.remember(db,row['workflow_id'],jid)
             db.execute('INSERT OR IGNORE INTO run_jobs(run_id,job_id) VALUES(?,?)',(run_id,jid))
             db.execute("UPDATE runs SET phase='checking',scanned=?,checkpoint=?,heartbeat=?,message=? WHERE id=?",(len(done),json.dumps({'checked_ids':list(done),'blocked_hosts':list(blocked)}),store.now(),f'Checking posting availability: {len(done)} of {len(ids)} jobs.',run_id))
     with store.connect(path) as db:

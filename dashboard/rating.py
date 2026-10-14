@@ -158,7 +158,7 @@ def mark(db, jid, status, error=''):
     db.execute('UPDATE jobs SET rating_status=?,rating_error=? WHERE id=?', (status, error, jid))
 
 
-def rate_jobs(path, ids, run_id=None, defer_reason=''):
+def rate_jobs(path, ids, run_id=None, defer_reason='', initial_counts=None):
     """Rate eligible jobs in small batches; keep failures inspectable and bounded."""
     with store.connect(path) as db:
         resolved = []
@@ -168,6 +168,7 @@ def rate_jobs(path, ids, run_id=None, defer_reason=''):
                 resolved.append(row['duplicate_of'] or row['id'])
     ids = list(dict.fromkeys(resolved))
     counts = {'rated': 0, 'cached': 0, 'unrated': 0}
+    initial_counts=initial_counts or {}
     pending = []
     with store.connect(path) as db:
         settings = settings_from(db)
@@ -203,7 +204,7 @@ def rate_jobs(path, ids, run_id=None, defer_reason=''):
             return True
         with store.connect(path) as db:
             return bool(db.execute("UPDATE runs SET phase='rating',rated=?,cached=?,unrated=?,message=?,heartbeat=? WHERE id=? AND status='running'",
-                                   (*counts.values(), message, store.now(), run_id)).rowcount)
+                                   (*(counts[k]+initial_counts.get(k,0) for k in counts), message, store.now(), run_id)).rowcount)
     if not progress('Checking automatic Luna ratings…'):
         return counts
     status = cli_status() if pending else {'ready': True}

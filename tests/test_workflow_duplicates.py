@@ -111,33 +111,39 @@ class WorkflowDuplicateTests(unittest.TestCase):
             result=self.app.mutate('/api/workflow/start',{})
             repeated=self.app.mutate('/api/workflow/start',{})
             self.assertTrue(repeated['active'])
-            self.assertEqual(len(result['ids']),4)
+            self.assertEqual(len(result['ids']),5)
             self.assertEqual(launch.call_count,1)
-            for index,rid in enumerate(result['ids']):
-                jobs=[] if index==0 else [self.job('existing'),other] if index==1 else [cross,final]
+            visits=[]
+            for _ in range(12):
+                self.app.reap()
+                if not self.app.processes:break
+                rid=next(iter(self.app.processes));visits.append(rid)
+                with store.connect(self.path) as db:
+                    step=db.execute('SELECT * FROM runs WHERE id=?',(rid,)).fetchone()
+                jobs=[self.job('existing'),other] if step['source_id']==1 else [cross,final]
                 with patch('dashboard.worker.collect',return_value=iter(jobs)) as collect:
                     run(self.path,rid)
-                    if index in (0,3):collect.assert_not_called()
-                    else:collect.assert_called_once()
+                    if step['kind']=='collection':collect.assert_called_once()
+                    else:collect.assert_not_called()
                 self.app.processes[rid].code=0
                 self.app.reap()
             self.assertFalse(self.app.processes)
-            self.assertEqual(model.call_count,3)
-            self.assertEqual(launch.call_count,4)
+            self.assertEqual(model.call_count,1)
+            self.assertEqual(set(visits),set(result['ids'])-{result['ids'][2]}) # no empty enrichment worker
         snapshot=self.app.snapshot()
         self.assertEqual(len(snapshot['jobs']),3)
         self.assertTrue(all(j['rating_status']=='complete' for j in snapshot['jobs']))
         self.assertTrue(all(r['status']=='completed' for r in snapshot['runs']))
-        self.assertEqual(sum(r['cached'] for r in snapshot['runs']),2)
+        self.assertEqual(snapshot['workflows'][0]['pipeline']['searches_started'],2)
 
     def test_workflow_can_rate_existing_jobs_without_any_saved_search(self):
         with store.connect(self.path) as db:
             store.upsert(db,self.job('existing'))
         with patch('dashboard.server.subprocess.Popen',return_value=source_tests.FakeProcess()):
             ids=self.app.start_workflow()['ids']
-        self.assertEqual(len(ids),2)
+        self.assertEqual(len(ids),3)
         with store.connect(self.path) as db:
-            self.assertEqual(db.execute('SELECT kind FROM runs WHERE id=?',(ids[0],)).fetchone()[0],'rating')
+            self.assertEqual(db.execute('SELECT kind FROM runs WHERE id=?',(ids[1],)).fetchone()[0],'rating')
 
     def test_backup_roundtrip_keeps_all_source_links_and_tracking(self):
         with store.connect(self.path) as db:

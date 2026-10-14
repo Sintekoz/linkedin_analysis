@@ -19,6 +19,7 @@ JOB_FIELDS = ('title', 'company', 'location', 'description', 'url', 'direct_url'
 POSTING_FIELDS = ('posting_status','posting_checked_at','posting_confirmed_at','posting_last_confirmed',
                   'posting_reason','posting_last_seen_at')
 JOB_FIELDS += POSTING_FIELDS
+JOB_FIELDS += ('description_source','description_fetched_at')
 TRACK_FIELDS = ('stage', 'notes', 'follow_up', 'contact', 'applied_date')
 FIT_FIELDS = ('title', 'company', 'location', 'description', 'work_model', 'job_type',
               'salary_min', 'salary_max', 'currency', 'salary_interval', 'industry', 'job_level', 'job_function')
@@ -94,6 +95,24 @@ def init(path):
           WHERE status IN ('queued','running','ready_review','needs_answers','needs_login','needs_browser','interrupted','needs_attention');
         CREATE UNIQUE INDEX IF NOT EXISTS application_target_active ON application_tasks(target_url)
           WHERE target_url!='' AND status IN ('queued','running','ready_review','needs_answers','needs_login','needs_browser','interrupted','needs_attention','submitted_by_user');
+        CREATE TABLE IF NOT EXISTS enrichment_tasks (
+          job_id TEXT PRIMARY KEY REFERENCES jobs(id), status TEXT NOT NULL DEFAULT 'pending',
+          attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT DEFAULT '',
+          message TEXT DEFAULT '', source_url TEXT DEFAULT '', updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS response_cache (
+          url TEXT PRIMARY KEY, status INTEGER NOT NULL, final_url TEXT NOT NULL,
+          body TEXT NOT NULL, fetched_at TEXT NOT NULL, etag TEXT DEFAULT '', modified TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS endpoint_health (
+          endpoint TEXT PRIMARY KEY, retry_at TEXT DEFAULT '', failures INTEGER DEFAULT 0,
+          reason TEXT DEFAULT '', updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS detail_cache (
+          provider TEXT NOT NULL,native_id TEXT NOT NULL,payload TEXT NOT NULL,fetched_at TEXT NOT NULL,
+          PRIMARY KEY(provider,native_id));
+        CREATE TABLE IF NOT EXISTS request_events (
+          id INTEGER PRIMARY KEY, run_id INTEGER REFERENCES runs(id), endpoint TEXT NOT NULL,
+          outcome TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS enrichment_due ON enrichment_tasks(status,next_attempt_at);
+        CREATE INDEX IF NOT EXISTS request_run ON request_events(run_id);
         ''')
         # Additive migrations preserve existing workspaces and application records.
         migrations = {
@@ -110,10 +129,11 @@ def init(path):
                      'workflow_id': 'INTEGER REFERENCES workflows(id)', 'attempts': 'INTEGER DEFAULT 0',
                      'retry_at': "TEXT DEFAULT ''", 'error_kind': "TEXT DEFAULT ''",
                      'checkpoint': "TEXT DEFAULT '{}'", 'collection_done': 'INTEGER DEFAULT 0',
-                     'worker_pid': 'INTEGER'},
+                     'worker_pid': 'INTEGER', 'dispatches':'INTEGER DEFAULT 0', 'last_dispatched_at':"TEXT DEFAULT ''"},
         }
         migrations['jobs'].update({k:"TEXT DEFAULT ''" for k in POSTING_FIELDS})
         migrations['jobs'].update({'interest':"TEXT NOT NULL DEFAULT 'interested'",'interest_updated_at':"TEXT NOT NULL DEFAULT ''"})
+        migrations['jobs'].update({'description_source':"TEXT DEFAULT ''",'description_fetched_at':"TEXT DEFAULT ''"})
         for table, fields in migrations.items():
             existing = {r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
             for name, definition in fields.items():
